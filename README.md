@@ -1,5 +1,6 @@
 # Installation
 
+make sure the `CUDA_HOME` environment variable points to the cuda toolkit directory (e.g `/usr/local/cuda`).
 for linux
 
 ```pip install .```
