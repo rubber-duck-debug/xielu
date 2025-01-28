@@ -1,13 +1,14 @@
 import torch
+import torch.nn.functional as F
 
 
 class XIELUPy(torch.nn.Module):
     def __init__(self, alpha_p_init=0.8, alpha_n_init=0.8, beta=0.5, eps=-1e-6):
         super(XIELUPy, self).__init__()
         self.beta = beta
-        self.alpha_p = nn.Parameter(
+        self.alpha_p = torch.nn.Parameter(
             torch.log(torch.exp(torch.tensor(alpha_p_init)) - 1).unsqueeze(0))
-        self.alpha_n = nn.Parameter(
+        self.alpha_n = torch.nn.Parameter(
             torch.log(torch.exp(torch.tensor(alpha_n_init - self.beta)) - 1).unsqueeze(0))
         self.eps = torch.tensor(eps)
 
@@ -26,9 +27,9 @@ class XIELU(torch.nn.Module):
         self.cuda_obj = torch.classes.xielu.XIELU()
         self.eps = eps
         self.beta = beta
-        self.alpha_p = nn.Parameter(
+        self.alpha_p = torch.nn.Parameter(
             torch.log(torch.exp(torch.tensor(alpha_p_init)) - 1).unsqueeze(0))
-        self.alpha_n = nn.Parameter(
+        self.alpha_n = torch.nn.Parameter(
             torch.log(torch.exp(torch.tensor(alpha_n_init - self.beta)) - 1).unsqueeze(0))
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
