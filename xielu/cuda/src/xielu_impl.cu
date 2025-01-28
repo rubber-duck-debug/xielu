@@ -86,13 +86,13 @@ __global__ void backward_kernel(const Accessor<scalar_t, 3> x,
     const int idx = blockIdx.x * blockDim.x + threadIdx.x;
 
 
-    //// Shared memory to accumulate contributions to dalpha_p and dalpha_n
-    //__shared__ scalar_t local_dalpha_p[128];  // One per thread
-    //__shared__ scalar_t local_dalpha_n[128];  // One per thread
+    // Shared memory to accumulate contributions to dalpha_p and dalpha_n
+    __shared__ scalar_t local_dalpha_p[128];
+    __shared__ scalar_t local_dalpha_n[128];
 
-    //// Initialize shared memory
-    //local_dalpha_p[threadIdx.x] = 0;
-    //local_dalpha_n[threadIdx.x] = 0;
+    // Initialize shared memory
+    local_dalpha_p[threadIdx.x] = 0;
+    local_dalpha_n[threadIdx.x] = 0;
 
     if (idx < total_elements) {
         int batch_idx = idx / (seq_len * hidden_dim);
@@ -110,8 +110,8 @@ __global__ void backward_kernel(const Accessor<scalar_t, 3> x,
 
             auto alpha_p_e = alpha_p[hidden_idx];
             scalar_t d_s_alpha_p = (alpha_p_e > 20 ? 1 : (exp(alpha_p_e)/log1p(exp(alpha_p_e))));
-            //local_dalpha_p[threadIdx.x] += grad_output * x_e * x_e * d_s_alpha_p;
-            atomicAdd(&dalpha_p[hidden_idx], grad_output * x_e * x_e * d_s_alpha_p);
+            local_dalpha_p[threadIdx.x] += grad_output * x_e * x_e * d_s_alpha_p;
+            //atomicAdd(&dalpha_p[hidden_idx], grad_output * x_e * x_e * d_s_alpha_p);
         }
         else {
             scalar_t d_expm1_dx = x_e < eps ? exp(x_e) : 0;
@@ -119,9 +119,26 @@ __global__ void backward_kernel(const Accessor<scalar_t, 3> x,
 
             auto alpha_n_e = alpha_n[hidden_idx];
             scalar_t d_s_alpha_n = (alpha_n_e > 20 ? 1 : (exp(alpha_n_e)/log1p(exp(alpha_n_e))));
-            //local_dalpha_n[threadIdx.x] += grad_output * (expm1(min(x_e, eps)) * d_s_alpha_n - x_e * d_s_alpha_n);
-            atomicAdd(&dalpha_n[hidden_idx], grad_output * (expm1(min(x_e, eps)) * d_s_alpha_n - x_e * d_s_alpha_n));
+            local_dalpha_n[threadIdx.x] += grad_output * (expm1(min(x_e, eps)) * d_s_alpha_n - x_e * d_s_alpha_n);
+            //atomicAdd(&dalpha_n[hidden_idx], grad_output * (expm1(min(x_e, eps)) * d_s_alpha_n - x_e * d_s_alpha_n));
         }
+    }
+
+    // Reduce shared memory contributions to global memory
+    __syncthreads();
+
+    // Perform block-wise reduction
+    if (threadIdx.x == 0) {
+        scalar_t sum_dalpha_p = 0;
+        scalar_t sum_dalpha_n = 0;
+
+        for (int i = 0; i < blockDim.x; i++) {
+            sum_dalpha_p += local_dalpha_p[i];
+            sum_dalpha_n += local_dalpha_n[i];
+        }
+
+        atomicAdd(&dalpha_p[blockIdx.x], sum_dalpha_p);
+        atomicAdd(&dalpha_n[blockIdx.x], sum_dalpha_n);
     }
 }
 
@@ -207,8 +224,7 @@ variable_list XIELUAutograd::backward(AutogradContext *ctx,
         x.scalar_type(), "backward", ([&] {
             // size_t space = 0;
             // void *sptr;
-            //const int sharedMemSize = 2 * blockSize * sizeof(scalar_t);
-            const int sharedMemSize = 0;
+            const int sharedMemSize = 2 * blockSize * sizeof(scalar_t);
             backward_kernel<<<numBlocks, blockSize, sharedMemSize, stream>>>(
                 get_accessor<scalar_t, 3>(x),
                 get_accessor<scalar_t, 1>(alpha_p),
