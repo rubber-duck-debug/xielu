@@ -51,8 +51,8 @@ class TestXIELU(unittest.TestCase):
         output_py = self.xielu_py(input_py)
         output_cuda = self.xielu(input_cuda)
 
-        gradcheck(self.xielu_py, (input_py,), eps=1e-3, rtol=1e-6, atol=1e-6)
-        gradcheck(self.xielu, (input_cuda,), eps=1e-3, rtol=1e-6, atol=1e-6)
+        gradcheck(self.xielu_py, (input_py,), eps=1e-5, rtol=1e-5, atol=1e-5)
+        gradcheck(self.xielu, (input_cuda,), eps=1e-5, rtol=1e-5, atol=1e-5)
 
 
 if __name__ == "__main__":
