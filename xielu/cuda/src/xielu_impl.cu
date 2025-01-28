@@ -181,6 +181,16 @@ torch::Tensor XIELUAutograd::forward(AutogradContext *ctx, Tensor x,
 
     PUSH_RANGE("XIELU_FWD", 0)
 
+    TORCH_CHECK(x.is_cuda(), "Input tensor x must be on the CUDA device.");
+    TORCH_CHECK(alpha_p.is_cuda(), "Input tensor alpha_p must be on the CUDA device.");
+    TORCH_CHECK(alpha_n.is_cuda(), "Input tensor alpha_n must be on the CUDA device.");
+    TORCH_CHECK(alpha_p.dim() == 0, "alpha_p must be a scalar tensor (0-dimensional).");
+    TORCH_CHECK(alpha_n.dim() == 0, "alpha_n must be a scalar tensor (0-dimensional).");
+    TORCH_CHECK(x.dtype() == alpha_p.dtype(),
+                "Data type of x (", x.dtype(), ") must match data type of alpha_p (", alpha_p.dtype(), ").");
+    TORCH_CHECK(x.dtype() == alpha_n.dtype(),
+                "Data type of x (", x.dtype(), ") must match data type of alpha_n (", alpha_n.dtype(), ").");
+
     const int batch_size = x.size(0);
     const int seq_len = x.size(1);
     const int hidden_dim = x.size(2);
@@ -229,6 +239,16 @@ variable_list XIELUAutograd::backward(AutogradContext *ctx,
     Tensor alpha_n = saved[2];
     const double eps = ctx->saved_data["eps"].toDouble();
     const double beta = ctx->saved_data["beta"].toDouble();
+
+    TORCH_CHECK(x.is_cuda(), "Input tensor x must be on the CUDA device.");
+    TORCH_CHECK(alpha_p.is_cuda(), "Input tensor alpha_p must be on the CUDA device.");
+    TORCH_CHECK(alpha_n.is_cuda(), "Input tensor alpha_n must be on the CUDA device.");
+    TORCH_CHECK(alpha_p.dim() == 0, "alpha_p must be a scalar tensor (0-dimensional).");
+    TORCH_CHECK(alpha_n.dim() == 0, "alpha_n must be a scalar tensor (0-dimensional).");
+    TORCH_CHECK(x.dtype() == alpha_p.dtype(),
+                "Data type of x (", x.dtype(), ") must match data type of alpha_p (", alpha_p.dtype(), ").");
+    TORCH_CHECK(x.dtype() == alpha_n.dtype(),
+                "Data type of x (", x.dtype(), ") must match data type of alpha_n (", alpha_n.dtype(), ").");
 
     const int nbatch = x.size(0);
     const int seq_len = x.size(1);
