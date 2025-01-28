@@ -5,9 +5,11 @@
 
 #include <c10/cuda/CUDAGuard.h>
 #include <c10/cuda/CUDAStream.h>
+#include <ATen/cuda/Atomic.cuh>
 #include <torch/script.h>
-//#include <torch/nn/functional.h>
 #include <math.h>
+//#include <cuda_bf16.h>
+//#include <cuda_fp16.h>
 
 using namespace std;
 using namespace torch::indexing;
@@ -33,10 +35,39 @@ static int getMaxBlocks() {
     return numMultiprocessors * 4;
 }
 
-template <typename scalar_t>
-__device__ scalar_t softplus(scalar_t x) {
-    return x > 20 ? x : log1p(exp(x)); // Numerically stable version of log(1 + exp(x))
-}
+template<typename T>
+struct softplus {
+    static __device__ T f(T x) {
+        return
+            x > T(20.0) ? x : (
+                x < T(-20.0) ? T(0.0) :
+                    log1p(exp(x)));
+    }
+
+    static __device__ T df(T x) {
+        return
+            x > T(20.0) ? T(1.0) : (
+                x < T(-20.0) ? T(0.0) :
+                    //sigmoid(x));
+                    T(1.0)/(T(1.0)+exp(-x)));
+    }
+};
+
+template<>
+struct softplus<c10::Half> {
+    static __device__ c10::Half f(c10::Half x) {
+        return static_cast<c10::Half>(softplus<float>::f(static_cast<float>(x))); }
+    static __device__ c10::Half df(c10::Half x) {
+        return static_cast<c10::Half>(softplus<float>::df(static_cast<float>(x))); }
+};
+
+template<>
+struct softplus<c10::BFloat16> {
+    static __device__ c10::BFloat16 f(c10::BFloat16 x) {
+        return static_cast<c10::BFloat16>(softplus<float>::f(static_cast<float>(x))); }
+    static __device__ c10::BFloat16 df(c10::BFloat16 x) {
+        return static_cast<c10::BFloat16>(softplus<float>::df(static_cast<float>(x))); }
+};
 
 template <typename scalar_t>
 __global__ void forward_kernel(const Accessor<scalar_t, 3> x,
@@ -58,13 +89,24 @@ __global__ void forward_kernel(const Accessor<scalar_t, 3> x,
         int seq_idx = residual / hidden_dim;
         int hidden_idx = residual - seq_idx * hidden_dim;
 
-        auto x_e = x[batch_idx][seq_idx][hidden_idx];
-        auto s_alpha_p = softplus(alpha_p[hidden_idx]);
-        auto s_alpha_n = beta + softplus(alpha_n[hidden_idx]);
+        // implementation of
+        // alpha_p = F.softplus(self.alpha_p)
+        // alpha_n = self.beta + F.softplus(self.alpha_n)
+        // return torch.where(x > 0,
+        //     alpha_p * x * x + self.beta * x,
+        //     alpha_n * torch.expm1(torch.min(x, self.eps)) - alpha_n * x + self.beta * x)
 
-        output[batch_idx][seq_idx][hidden_idx] = x_e > 0 ?
-            s_alpha_p * x_e * x_e + beta * x_e :
-            s_alpha_n * expm1(min(x_e, eps)) - s_alpha_n * x_e + beta * x_e;
+        using sp = softplus<scalar_t>;
+        scalar_t x_e = x[batch_idx][seq_idx][hidden_idx];
+        scalar_t s_alpha_p = sp::f(alpha_p[0]);
+        scalar_t s_alpha_n = sp::f(alpha_n[0]);
+
+        if (static_cast<float>(x_e) > 0.0f) {
+            output[batch_idx][seq_idx][hidden_idx] = sp::f(alpha_p[0]) * x_e * x_e + beta * x_e;
+        }
+        else {
+            output[batch_idx][seq_idx][hidden_idx] = (beta + s_alpha_n) * expm1(min(x_e, eps)) - s_alpha_n * x_e;
+        }
     }
 }
 
@@ -85,14 +127,9 @@ __global__ void backward_kernel(const Accessor<scalar_t, 3> x,
     const int total_elements = batch_size * seq_len * hidden_dim;
     const int idx = blockIdx.x * blockDim.x + threadIdx.x;
 
-
     // Shared memory to accumulate contributions to dalpha_p and dalpha_n
     __shared__ scalar_t local_dalpha_p[128];
     __shared__ scalar_t local_dalpha_n[128];
-
-    // Initialize shared memory
-    local_dalpha_p[threadIdx.x] = 0;
-    local_dalpha_n[threadIdx.x] = 0;
 
     if (idx < total_elements) {
         int batch_idx = idx / (seq_len * hidden_dim);
@@ -100,27 +137,23 @@ __global__ void backward_kernel(const Accessor<scalar_t, 3> x,
         int seq_idx = residual / hidden_dim;
         int hidden_idx = residual - seq_idx * hidden_dim;
 
-        auto x_e = x[batch_idx][seq_idx][hidden_idx];
-        auto grad_output = grad_outputs[batch_idx][seq_idx][hidden_idx];
-        auto s_alpha_p = softplus(alpha_p[hidden_idx]);
-        auto s_alpha_n = beta + softplus(alpha_n[hidden_idx]);
+        using sp = softplus<scalar_t>;
+        scalar_t x_e = x[batch_idx][seq_idx][hidden_idx];
+        scalar_t grad_output = grad_outputs[batch_idx][seq_idx][hidden_idx];
 
-        if (x_e > 0) {
-            dx[batch_idx][seq_idx][hidden_idx] = grad_output * (2 * s_alpha_p * x_e + beta);
-
-            auto alpha_p_e = alpha_p[hidden_idx];
-            scalar_t d_s_alpha_p = (alpha_p_e > 20 ? 1 : (exp(alpha_p_e)/log1p(exp(alpha_p_e))));
-            local_dalpha_p[threadIdx.x] += grad_output * x_e * x_e * d_s_alpha_p;
-            //atomicAdd(&dalpha_p[hidden_idx], grad_output * x_e * x_e * d_s_alpha_p);
+        if (static_cast<float>(x_e) > 0.0f) {
+            dx[batch_idx][seq_idx][hidden_idx] = grad_output * 2 * sp::f(alpha_p[0]) * x_e + beta;
+            local_dalpha_p[threadIdx.x] = grad_output * sp::df(alpha_p[0]) * x_e * x_e;
         }
         else {
-            scalar_t d_expm1_dx = x_e < eps ? exp(x_e) : 0;
-            dx[batch_idx][seq_idx][hidden_idx] = grad_output * (s_alpha_n * d_expm1_dx - s_alpha_n + beta);
-
-            auto alpha_n_e = alpha_n[hidden_idx];
-            scalar_t d_s_alpha_n = (alpha_n_e > 20 ? 1 : (exp(alpha_n_e)/log1p(exp(alpha_n_e))));
-            local_dalpha_n[threadIdx.x] += grad_output * (expm1(min(x_e, eps)) * d_s_alpha_n - x_e * d_s_alpha_n);
-            //atomicAdd(&dalpha_n[hidden_idx], grad_output * (expm1(min(x_e, eps)) * d_s_alpha_n - x_e * d_s_alpha_n));
+            if (static_cast<float>(x_e) < static_cast<float>(eps)) {
+                dx[batch_idx][seq_idx][hidden_idx] = grad_output * (
+                    (beta + sp::f(alpha_n[0])) * expm1(x_e) - sp::f(alpha_n[0]));
+            }
+            else {
+                dx[batch_idx][seq_idx][hidden_idx] = grad_output * (-sp::f(alpha_n[0]));
+            }
+            local_dalpha_n[threadIdx.x] = grad_output * sp::df(alpha_n[0]) * (expm1(min(x_e, eps)) - x_e);
         }
     }
 
@@ -129,16 +162,16 @@ __global__ void backward_kernel(const Accessor<scalar_t, 3> x,
 
     // Perform block-wise reduction
     if (threadIdx.x == 0) {
-        scalar_t sum_dalpha_p = 0;
-        scalar_t sum_dalpha_n = 0;
+        scalar_t sum_dalpha_p = scalar_t(0.0);
+        scalar_t sum_dalpha_n = scalar_t(0.0);
 
         for (int i = 0; i < blockDim.x; i++) {
             sum_dalpha_p += local_dalpha_p[i];
             sum_dalpha_n += local_dalpha_n[i];
         }
 
-        atomicAdd(&dalpha_p[blockIdx.x], sum_dalpha_p);
-        atomicAdd(&dalpha_n[blockIdx.x], sum_dalpha_n);
+        gpuAtomicAdd(&dalpha_p[blockIdx.x], sum_dalpha_p);
+        gpuAtomicAdd(&dalpha_n[blockIdx.x], sum_dalpha_n);
     }
 }
 
@@ -163,8 +196,8 @@ torch::Tensor XIELUAutograd::forward(AutogradContext *ctx, Tensor x,
     const auto stream = c10::cuda::getCurrentCUDAStream(x.get_device());
     const c10::cuda::CUDAStreamGuard guard(stream);
 
-    AT_DISPATCH_FLOATING_TYPES(
-        x.scalar_type(), "forward", ([&] {
+    AT_DISPATCH_FLOATING_TYPES_AND2(
+        at::ScalarType::Half, at::ScalarType::BFloat16, x.scalar_type(), "forward", ([&] {
             // size_t space = 0;
             // void *sptr;
             forward_kernel<<<numBlocks, blockSize, 0, stream>>>(
@@ -220,12 +253,11 @@ variable_list XIELUAutograd::backward(AutogradContext *ctx,
     const auto stream = c10::cuda::getCurrentCUDAStream(x.get_device());
     const c10::cuda::CUDAStreamGuard guard(stream);
 
-    AT_DISPATCH_FLOATING_TYPES(
-        x.scalar_type(), "backward", ([&] {
+    AT_DISPATCH_FLOATING_TYPES_AND2(
+        at::ScalarType::Half, at::ScalarType::BFloat16, x.scalar_type(), "backward", ([&] {
             // size_t space = 0;
             // void *sptr;
-            const int sharedMemSize = 2 * blockSize * sizeof(scalar_t);
-            backward_kernel<<<numBlocks, blockSize, sharedMemSize, stream>>>(
+            backward_kernel<<<numBlocks, blockSize, 0, stream>>>(
                 get_accessor<scalar_t, 3>(x),
                 get_accessor<scalar_t, 1>(alpha_p),
                 get_accessor<scalar_t, 1>(alpha_n),
