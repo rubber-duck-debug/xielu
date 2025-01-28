@@ -184,8 +184,8 @@ torch::Tensor XIELUAutograd::forward(AutogradContext *ctx, Tensor x,
     TORCH_CHECK(x.is_cuda(), "Input tensor x must be on the CUDA device.");
     TORCH_CHECK(alpha_p.is_cuda(), "Input tensor alpha_p must be on the CUDA device.");
     TORCH_CHECK(alpha_n.is_cuda(), "Input tensor alpha_n must be on the CUDA device.");
-    TORCH_CHECK(alpha_p.dim() == 0, "alpha_p must be a scalar tensor (0-dimensional).");
-    TORCH_CHECK(alpha_n.dim() == 0, "alpha_n must be a scalar tensor (0-dimensional).");
+    TORCH_CHECK(alpha_p.dim() == 1 && alpha_p.numel() == 1, "alpha_p must be a 1-D tensor with one element.");
+    TORCH_CHECK(alpha_n.dim() == 1 && alpha_n.numel() == 1, "alpha_n must be a 1-D tensor with one element.");
     TORCH_CHECK(x.dtype() == alpha_p.dtype(),
                 "Data type of x (", x.dtype(), ") must match data type of alpha_p (", alpha_p.dtype(), ").");
     TORCH_CHECK(x.dtype() == alpha_n.dtype(),
@@ -243,8 +243,8 @@ variable_list XIELUAutograd::backward(AutogradContext *ctx,
     TORCH_CHECK(x.is_cuda(), "Input tensor x must be on the CUDA device.");
     TORCH_CHECK(alpha_p.is_cuda(), "Input tensor alpha_p must be on the CUDA device.");
     TORCH_CHECK(alpha_n.is_cuda(), "Input tensor alpha_n must be on the CUDA device.");
-    TORCH_CHECK(alpha_p.dim() == 0, "alpha_p must be a scalar tensor (0-dimensional).");
-    TORCH_CHECK(alpha_n.dim() == 0, "alpha_n must be a scalar tensor (0-dimensional).");
+    TORCH_CHECK(alpha_p.dim() == 1 && alpha_p.numel() == 1, "alpha_p must be a 1-D tensor with one element.");
+    TORCH_CHECK(alpha_n.dim() == 1 && alpha_n.numel() == 1, "alpha_n must be a 1-D tensor with one element.");
     TORCH_CHECK(x.dtype() == alpha_p.dtype(),
                 "Data type of x (", x.dtype(), ") must match data type of alpha_p (", alpha_p.dtype(), ").");
     TORCH_CHECK(x.dtype() == alpha_n.dtype(),

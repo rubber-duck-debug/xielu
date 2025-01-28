@@ -1,12 +1,14 @@
 [project]
 name = "xielu"
+version = "0.1"
+description = "CUDA implementation of XIELU"
+readme = "README.md"
+authors = [{name = "CSCS"}]
 requires-python = ">=3.10"
 dependencies = [
     "torch >= 2.0", 
     "nvtx",
 ]
-
-version= "0.1"
 
 ### ================== ###
 
@@ -23,3 +25,10 @@ build-backend = "setuptools.build_meta"
 [tool.setuptools]
 zip-safe = false
 packages = ["xielu.ops"]
+
+[project.optional-dependencies]
+tests = [
+    "pytest",
+    #"pytest-cov",
+    #"torch >= 2.0"
+]

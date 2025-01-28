@@ -11,9 +11,12 @@ class TestXIELU(unittest.TestCase):
         self.alpha_n_init = 0.8
         self.beta = 0.5
         self.eps = 1e-6
-        self.xielu_py = XIELUPy(self.alpha_p_init, self.alpha_n_init, self.beta, self.eps)
-        self.xielu = XIELU(self.alpha_p_init, self.alpha_n_init, self.beta, self.eps)
-        self.input = torch.randn(5, 7, requires_grad=True)
+
+        self.device = torch.device("cuda")
+
+        self.xielu_py = XIELUPy(self.alpha_p_init, self.alpha_n_init, self.beta, self.eps).to(self.device)
+        self.xielu = XIELU(self.alpha_p_init, self.alpha_n_init, self.beta, self.eps).to(self.device)
+        self.input = torch.randn(5, 7, device=self.device, requires_grad=True)
 
     def test_forward(self):
         output_py = self.xielu_py(self.input)
