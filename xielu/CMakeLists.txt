@@ -35,12 +35,12 @@ message(STATUS "TORCH_CMAKE_PATH_OUTPUT: ${TORCH_CMAKE_PATH_OUTPUT}")
 find_package(Torch 2.0 REQUIRED)
 
 add_library(xielu SHARED
-    "common/utils.cuh"
+    #"common/utils.cuh"
 
-    "cpp/include/xielu.hpp"
+    #"cpp/include/xielu.hpp"
     "cpp/src/xielu.cpp"
 
-    "cuda/include/xielu_impl.hpp"
+    #"cuda/include/xielu_impl.hpp"
     "cuda/src/xielu_impl.cu"
 )
 
