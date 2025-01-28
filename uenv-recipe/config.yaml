@@ -1,0 +1,8 @@
+name: pytorch_basic
+spack:
+  commit: develop-2025-01-26
+  repo: https://github.com/spack/spack.git
+modules: false
+store: /user-environment
+description: pytorch
+
