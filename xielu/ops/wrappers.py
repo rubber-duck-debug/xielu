@@ -19,6 +19,13 @@ class XIELUPy(torch.nn.Module):
                            alpha_p * x * x + self.beta * x,
                            alpha_n * torch.expm1(torch.min(x, self.eps)) - alpha_n * x + self.beta * x)
 
+    def forward_test(self, x: torch.Tensor, a_p, a_n) -> torch.Tensor:
+        alpha_p = F.softplus(a_p)
+        alpha_n = self.beta + F.softplus(a_n)
+        return torch.where(x > 0,
+                           alpha_p * x * x + self.beta * x,
+                           alpha_n * torch.expm1(torch.min(x, self.eps)) - alpha_n * x + self.beta * x)
+
 
 class XIELU(torch.nn.Module):
     def __init__(self, alpha_p_init=0.8, alpha_n_init=0.8, beta=0.5, eps=1e-6):
@@ -34,3 +41,6 @@ class XIELU(torch.nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.cuda_obj.forward(x, self.alpha_p, self.alpha_n, self.beta, self.eps)
+
+    def forward_test(self, x: torch.Tensor, a_p, a_n) -> torch.Tensor:
+        return self.cuda_obj.forward(x, a_p, a_n, self.beta, self.eps)

@@ -28,7 +28,5 @@ packages = ["xielu.ops"]
 
 [project.optional-dependencies]
 tests = [
-    "pytest",
-    #"pytest-cov",
-    #"torch >= 2.0"
+    "unittest",
 ]

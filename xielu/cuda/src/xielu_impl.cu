@@ -8,8 +8,6 @@
 #include <c10/cuda/CUDAStream.h>
 #include <math.h>
 #include <torch/script.h>
-//#include <cuda_bf16.h>
-//#include <cuda_fp16.h>
 
 using namespace std;
 using namespace torch::indexing;
@@ -86,7 +84,7 @@ __global__ void forward_kernel(const Accessor<scalar_t, 3> x,
 
   using sp = softplus<scalar_t>;
   const scalar_t s_alpha_p = sp::f(alpha_p[0]);
-  const scalar_t s_alpha_n = beta + sp::f(alpha_n[0]);
+  const scalar_t s_alpha_n = sp::f(alpha_n[0]);
 
   for (int idx = blockIdx.x * blockDim.x + threadIdx.x; idx < total_elements;
        idx += blockDim.x * gridDim.x) {
@@ -106,12 +104,13 @@ __global__ void forward_kernel(const Accessor<scalar_t, 3> x,
 
     scalar_t x_e = x[batch_idx][seq_idx][hidden_idx];
 
-    if (static_cast<float>(x_e) > float(0.0)) {
+    if (static_cast<float>(x_e) > 0.0f) {
       output[batch_idx][seq_idx][hidden_idx] =
-          s_alpha_p * x_e * x_e + beta * x_e;
-    } else {
+        s_alpha_p * x_e * x_e + beta * x_e;
+    }
+    else {
       output[batch_idx][seq_idx][hidden_idx] =
-          s_alpha_n * expm1(min(x_e, eps)) - s_alpha_n * x_e + beta * x_e;
+        (beta + s_alpha_n) * expm1(min(x_e, eps)) - s_alpha_n * x_e;
     }
   }
 }
@@ -136,7 +135,7 @@ __global__ void backward_kernel(const Accessor<scalar_t, 3> x,
   const scalar_t _alpha_n = alpha_n[0];
 
   const scalar_t s_alpha_p = sp::f(_alpha_p);
-  const scalar_t s_alpha_n = beta + sp::f(_alpha_n);
+  const scalar_t s_alpha_n = sp::f(_alpha_n);
 
   reduction_type thread_dalpha_p = 0.0;
   reduction_type thread_dalpha_n = 0.0;
@@ -152,17 +151,17 @@ __global__ void backward_kernel(const Accessor<scalar_t, 3> x,
     const scalar_t x_e = x[batch_idx][seq_idx][hidden_idx];
     const scalar_t grad_output = grad_outputs[batch_idx][seq_idx][hidden_idx];
 
-    if (static_cast<float>(x_e) > scalar_t(0.0)) {
+    if (static_cast<float>(x_e) > 0.0f) {
       dx[batch_idx][seq_idx][hidden_idx] =
-          grad_output * (2 * s_alpha_p * x_e + beta);
-      thread_dalpha_p += grad_output * sp::df(_alpha_p) * x_e * x_e;
-    } else {
+        grad_output * (2 * s_alpha_p * x_e + beta);
+      thread_dalpha_p +=
+          grad_output * sp::df(_alpha_p) * x_e * x_e;
+    }
+    else {
       dx[batch_idx][seq_idx][hidden_idx] =
-          grad_output * (s_alpha_n * exp(min(x_e, eps)) - s_alpha_n + beta);
-
+        grad_output * ((beta +s_alpha_n) * exp(min(x_e, eps)) - s_alpha_n);
       thread_dalpha_n +=
-          grad_output *
-          (sp::df(_alpha_n) * expm1(min(x_e, eps)) - sp::df(_alpha_n) * x_e);
+        grad_output * sp::df(_alpha_n) * (expm1(min(x_e, eps)) - x_e);
     }
   }
 
@@ -327,8 +326,8 @@ variable_list XIELUAutograd::backward(AutogradContext *ctx,
         }));
   }
 
-  torch::Tensor dalpha_p_sum = torch::sum(dalpha_p).to(dx.dtype());
-  torch::Tensor dalpha_n_sum = torch::sum(dalpha_n).to(dx.dtype());
+  torch::Tensor dalpha_p_sum = torch::sum(dalpha_p, 0, true).to(dx.dtype());
+  torch::Tensor dalpha_n_sum = torch::sum(dalpha_n, 0, true).to(dx.dtype());
 
   torch::Tensor undef;
 

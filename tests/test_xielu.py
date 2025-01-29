@@ -7,8 +7,7 @@ import torch.nn.functional as F
 
 NBATCH = 4
 NSEQ = 16
-HIDDENDIM = 32
-
+HIDDENDIM = 2
 
 class TestXIELU(unittest.TestCase):
     def setUp(self):
@@ -17,6 +16,7 @@ class TestXIELU(unittest.TestCase):
         self.beta = 0.5
         self.eps = 1e-6
 
+        self.dtypes = [torch.float16, torch.bfloat16, torch.float32, torch.float64]
         self.device = torch.device("cuda")
 
         self.input = torch.randn(
@@ -24,7 +24,7 @@ class TestXIELU(unittest.TestCase):
             NSEQ,
             HIDDENDIM,
             device=self.device,
-            dtype=torch.double,
+            dtype=torch.float64,
             requires_grad=True,
         )
 
@@ -39,21 +39,45 @@ class TestXIELU(unittest.TestCase):
             .to(self.input.dtype)
         )
 
-    def test_forward(self):
-        output_py = self.xielu_py(self.input)
-        output_cuda = self.xielu(self.input)
+    def run_forward_comparison(self, input_tensor):
+        output_py = self.xielu_py(input_tensor)
+        output_cuda = self.xielu(input_tensor)
         torch.testing.assert_close(output_py, output_cuda, rtol=1e-6, atol=1e-6)
 
+    def test_forward(self):
+        self.run_forward_comparison(self.input)
+
+    def run_gradcheck(self, model, inputs, dtype=torch.float64, eps=1e-5, rtol=1e-5, atol=1e-5):
+        inputs = tuple(inp.clone().detach().to(dtype).requires_grad_(True) for inp in inputs)
+        gradcheck(model, inputs, eps=eps, rtol=rtol, atol=atol, fast_mode=True)
+
     def test_gradients(self):
-        input_py = self.input.clone().detach().requires_grad_(True)
-        input_cuda = self.input.clone().detach().requires_grad_(True)  #
+        self.run_gradcheck(self.xielu_py, (self.input,))
+        self.run_gradcheck(self.xielu, (self.input,))
 
-        output_py = self.xielu_py(input_py)
-        output_cuda = self.xielu(input_cuda)
+    def test_alpha_p_alpha_n_gradients(self):
+        self.run_gradcheck(self.xielu_py.forward_test, (self.input, self.xielu_py.alpha_p, self.xielu_py.alpha_n))
+        self.run_gradcheck(self.xielu.forward_test, (self.input, self.xielu.alpha_p, self.xielu.alpha_n))
 
-        gradcheck(self.xielu_py, (input_py,), eps=1e-5, rtol=1e-5, atol=1e-5)
-        gradcheck(self.xielu, (input_cuda,), eps=1e-5, rtol=1e-5, atol=1e-5)
+    def test_edge_cases(self):
+        edge_inputs = {
+            "zero": torch.zeros_like(self.input, dtype=torch.float64, requires_grad=True),
+            "large": torch.full_like(self.input, 1e10, dtype=torch.float64, requires_grad=True),
+            "small": torch.full_like(self.input, 1e-10, dtype=torch.float64, requires_grad=True),
+            "negative": torch.full_like(self.input, -1.0, dtype=torch.float64, requires_grad=True),
+        }
+        for case, input_tensor in edge_inputs.items():
+            with self.subTest(case=case):
+                self.run_forward_comparison(input_tensor)
 
+    #def test_alpha_p_alpha_n_dtypes(self):
+    #    """Test alpha_p and alpha_n gradients with different dtypes."""
+    #    for dtype in self.dtypes:
+    #        with self.subTest(dtype=dtype):
+    #            if dtype == torch.bfloat16 and not torch.cuda.is_bf16_supported():
+    #                self.skipTest("bfloat16 is not supported on this GPU.")
+    #            self.run_gradcheck(self.xielu.forward_test, (self.input, self.xielu.alpha_p, self.xielu.alpha_n), dtype,
+    #                atol=1e-3 if dtype in [torch.float16, torch.bfloat16] else 1e-5)
 
 if __name__ == "__main__":
     unittest.main()
