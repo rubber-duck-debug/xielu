@@ -1,2 +1,4 @@
 build/
 xielu.egg-info/
+.vscode/
+__pycache__/

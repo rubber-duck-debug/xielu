@@ -1,0 +1,51 @@
+pytorch_basic:
+  compiler:
+      - toolchain: gcc
+        spec: gcc
+  mpi:
+      spec: cray-mpich@8.1.30
+      gpu: cuda
+  unify: true
+  specs:
+  - cray-mpich
+  - cuda
+  - nccl@2.23.4-1
+  - aws-ofi-nccl@1.9.2
+  - cmake
+  - ninja
+  - xpmem
+  - fftw
+  - fmt
+  - hdf5 +direct-vfd
+  - gperftools
+  - openblas threads=openmp
+  #- armpl-gcc threads=openmp
+  - cudnn
+  - cutensor
+  - hydra
+  - swig
+  - libaio
+  - faiss +python
+  - python
+  - python-venv
+  - py-pip
+  - py-cython
+  - py-setuptools
+  - py-wheel
+  - py-pybind11
+  - py-nvtx
+  - py-torch@2.5.1 +custom-protobuf +distributed +fbgemm ~mkldnn +numpy +openmp +qnnpack ~rocm +numa +cudnn +magma +nccl ~gloo +mpi +xnnpack +tensorpipe +caffe2 +kineto +valgrind  
+  - py-torchvision +ffmpeg +nvjpeg +video_codec
+  - py-torchaudio
+  - py-torchmetrics
+  variants:
+  - +mpi
+  - +cuda
+  - cuda_arch=90
+  views:
+    default:
+      link: all
+      uenv:
+        prefix_paths:
+          LD_LIBRARY_PATH: [lib, lib64]
+

@@ -57,5 +57,6 @@ target_link_libraries(xielu PRIVATE "${TORCH_LIBRARIES}")
 target_compile_features(xielu PRIVATE cxx_std_17)
 
 install(TARGETS xielu
-    LIBRARY DESTINATION "lib"
+    LIBRARY DESTINATION ${CMAKE_INSTALL_PREFIX}/${LIB_INSTALL_DIR}
+    RUNTIME DESTINATION ${CMAKE_INSTALL_PREFIX}/${BIN_INSTALL_DIR}
 )
