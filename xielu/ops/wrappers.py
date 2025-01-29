@@ -14,11 +14,11 @@ def create_xielu_params(alpha_p_init=0.8, alpha_n_init=0.8, beta=0.5, eps=-1e-6,
     return alpha_p, alpha_n, beta, eps
 
 
-# @torch.compile()
 class XIELUPy(torch.nn.Module):
     def __init__(self, alpha_p_init=0.8, alpha_n_init=0.8, beta=0.5, eps=-1e-6, device=None, dtype=None):
         super().__init__()
-        self.alpha_p, self.alpha_n, self.beta, self.eps = create_xielu_params(alpha_p_init, alpha_n_init, beta, eps, device, dtype)
+        self.alpha_p, self.alpha_n, self.beta, self.eps = create_xielu_params(
+            alpha_p_init, alpha_n_init, beta, eps, device, dtype)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         alpha_p = F.softplus(self.alpha_p)
@@ -35,7 +35,6 @@ class XIELUPy(torch.nn.Module):
                            alpha_n * torch.expm1(torch.min(x, self.eps)) - alpha_n * x + self.beta * x)
 
 
-# @torch.compile()
 class XIELUfn(torch.nn.Module):
     class XIELUfunction(torch.autograd.Function):
         @staticmethod
@@ -44,8 +43,8 @@ class XIELUfn(torch.nn.Module):
             alpha_p = F.softplus(alpha_p)
             alpha_n = beta + F.softplus(alpha_n)
             output = torch.where(x > 0,
-                                alpha_p * x * x + beta * x,
-                                alpha_n * torch.expm1(torch.clamp_max(x, eps)) - alpha_n * x + beta * x)
+                                 alpha_p * x * x + beta * x,
+                                 alpha_n * torch.expm1(torch.clamp_max(x, eps)) - alpha_n * x + beta * x)
             return output
 
         @staticmethod
@@ -57,23 +56,27 @@ class XIELUfn(torch.nn.Module):
             grad_input = torch.zeros_like(x)
             grad_alpha_p = torch.zeros_like(alpha_p)
             grad_alpha_n = torch.zeros_like(alpha_n)
-            # grad_beta = torch.zeros_like(beta)
 
             positive_mask = x > 0
             negative_mask = x <= 0
 
-            grad_input[positive_mask] = grad_output[positive_mask] * (2 * p * x[positive_mask] + beta)
-            grad_input[negative_mask] = grad_output[negative_mask] * (n * torch.exp(torch.clamp_max(x[negative_mask], eps)) - n + beta)
+            grad_input[positive_mask] = grad_output[positive_mask] * \
+                (2 * p * x[positive_mask] + beta)
+            grad_input[negative_mask] = grad_output[negative_mask] * \
+                (n *
+                 torch.exp(torch.clamp_max(x[negative_mask], eps)) - n + beta)
 
-            grad_alpha_p = torch.sum(grad_output[positive_mask] * x[positive_mask] * x[positive_mask] * torch.sigmoid(alpha_p))
-            grad_alpha_n = torch.sum(grad_output[negative_mask] * (torch.expm1(torch.clamp_max(x[negative_mask], eps)) - x[negative_mask]) * torch.sigmoid(alpha_n))
-            # grad_beta = torch.sum(grad_output * (x + torch.where(x > 0, torch.zeros_like(x), -x)))
+            grad_alpha_p = torch.sum(
+                grad_output[positive_mask] * x[positive_mask] * x[positive_mask] * torch.sigmoid(alpha_p))
+            grad_alpha_n = torch.sum(grad_output[negative_mask] * (torch.expm1(
+                torch.clamp_max(x[negative_mask], eps)) - x[negative_mask]) * torch.sigmoid(alpha_n))
 
             return grad_input, grad_alpha_p.unsqueeze(0), grad_alpha_n.unsqueeze(0), None, None
 
     def __init__(self, alpha_p_init=0.8, alpha_n_init=0.8, beta=0.5, eps=-1e-6, device=None, dtype=None):
         super().__init__()
-        self.alpha_p, self.alpha_n, self.beta, self.eps = create_xielu_params(alpha_p_init, alpha_n_init, beta, eps, device, dtype)
+        self.alpha_p, self.alpha_n, self.beta, self.eps = create_xielu_params(
+            alpha_p_init, alpha_n_init, beta, eps, device, dtype)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.XIELUfunction.apply(x, self.alpha_p, self.alpha_n, self.beta, self.eps)
@@ -85,7 +88,8 @@ class XIELUfn(torch.nn.Module):
 class XIELU(torch.nn.Module):
     def __init__(self, alpha_p_init=0.8, alpha_n_init=0.8, beta=0.5, eps=1e-6, device=None, dtype=None):
         super().__init__()
-        self.alpha_p, self.alpha_n, self.beta, self.eps = create_xielu_params(alpha_p_init, alpha_n_init, beta, eps, device, dtype)
+        self.alpha_p, self.alpha_n, self.beta, self.eps = create_xielu_params(
+            alpha_p_init, alpha_n_init, beta, eps, device, dtype)
         self.cuda_obj = torch.classes.xielu.XIELU()
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:

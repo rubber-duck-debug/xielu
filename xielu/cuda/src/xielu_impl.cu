@@ -44,9 +44,7 @@ template <typename T> struct softplus {
 
   static __device__ T df(T x) {
     return x > T(20.0) ? T(1.0)
-                       : (x < T(-20.0) ? T(0.0) :
-                                       // sigmoid(x));
-                              T(1.0) / (T(1.0) + exp(-x)));
+                       : (x < T(-20.0) ? T(0.0) : T(1.0) / (T(1.0) + exp(-x)));
   }
 };
 
@@ -94,23 +92,14 @@ __global__ void forward_kernel(const Accessor<scalar_t, 3> x,
     int seq_idx = residual / hidden_dim;
     int hidden_idx = residual - seq_idx * hidden_dim;
 
-    // implementation of
-    // alpha_p = F.softplus(self.alpha_p)
-    // alpha_n = self.beta + F.softplus(self.alpha_n)
-    // return torch.where(x > 0,
-    //     alpha_p * x * x + self.beta * x,
-    //     alpha_n * torch.expm1(torch.min(x, self.eps)) - alpha_n * x +
-    //     self.beta * x)
-
     scalar_t x_e = x[batch_idx][seq_idx][hidden_idx];
 
     if (static_cast<float>(x_e) > 0.0f) {
       output[batch_idx][seq_idx][hidden_idx] =
-        s_alpha_p * x_e * x_e + beta * x_e;
-    }
-    else {
+          s_alpha_p * x_e * x_e + beta * x_e;
+    } else {
       output[batch_idx][seq_idx][hidden_idx] =
-        (beta + s_alpha_n) * expm1(min(x_e, eps)) - s_alpha_n * x_e;
+          (beta + s_alpha_n) * expm1(min(x_e, eps)) - s_alpha_n * x_e;
     }
   }
 }
@@ -154,15 +143,13 @@ __global__ void backward_kernel(const Accessor<scalar_t, 3> x,
 
     if (static_cast<float>(x_e) > 0.0f) {
       dx[batch_idx][seq_idx][hidden_idx] =
-        grad_output * (2 * s_alpha_p * x_e + beta);
-      thread_dalpha_p +=
-          grad_output * sp::df(_alpha_p) * x_e * x_e;
-    }
-    else {
+          grad_output * (2 * s_alpha_p * x_e + beta);
+      thread_dalpha_p += grad_output * sp::df(_alpha_p) * x_e * x_e;
+    } else {
       dx[batch_idx][seq_idx][hidden_idx] =
-        grad_output * ((beta +s_alpha_n) * exp(min(x_e, eps)) - s_alpha_n);
+          grad_output * ((beta + s_alpha_n) * exp(min(x_e, eps)) - s_alpha_n);
       thread_dalpha_n +=
-        grad_output * sp::df(_alpha_n) * (expm1(min(x_e, eps)) - x_e);
+          grad_output * sp::df(_alpha_n) * (expm1(min(x_e, eps)) - x_e);
     }
   }
 

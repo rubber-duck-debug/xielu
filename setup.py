@@ -9,14 +9,6 @@ from setuptools.command.bdist_egg import bdist_egg
 from setuptools.command.build_ext import build_ext
 from wheel.bdist_wheel import bdist_wheel
 
-#__author__ = "CSCS"
-#__credits__ = ""
-#__license__ = ""
-#__version__ = "0.1"
-#__maintainer__ = ""
-#__email__ = ""
-#__status__ = "Alpha"
-#__description__ = "CUDA implementation of XIELU"
 
 ROOT = os.path.realpath(os.path.dirname(__file__))
 
@@ -95,7 +87,7 @@ class cmake_ext(build_ext):
 
 if __name__ == "__main__":
     setup(
-        #version=__version__,
+        # version=__version__,
         ext_modules=[
             Extension(name="xielu", sources=[]),
         ],
