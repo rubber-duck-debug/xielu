@@ -5,7 +5,6 @@ from xielu.ops.wrappers import XIELUPy, XIELU, XIELUfn
 def benchmark_model(model, input_tensor, label):
     """Benchmark forward and backward passes of a model."""
     results = []
-
     # Forward pass benchmark
     t_forward = benchmark.Timer(
         stmt="model(input_tensor)",
@@ -39,20 +38,19 @@ def run_benchmarks():
     device = torch.device("cuda")
 
     # Set batch size, sequence length, and hidden dimensions
-    NBATCH, NSEQ, HIDDENDIM = 16, 32, 128
+    NBATCH, NSEQ, HIDDENDIM = 5, 4096, 8192
 
     # Create input tensor
     input_tensor = torch.randn(NBATCH, NSEQ, HIDDENDIM, device=device, dtype=torch.float32)
 
     # Initialize models
-    xielu_py = XIELUPy(0.8, 0.8, 0.5, 1e-6).to(device)
+    xielu_py = torch.compile(XIELUPy(0.8, 0.8, 0.5, 1e-6)).to(device)
     #xielu_fn = XIELUfn(0.8, 0.8, 0.5, 1e-6).to(device)
-    xielu_cuda = XIELU(0.8, 0.8, 0.5, 1e-6).to(device)
+    xielu_cuda = torch.compile(XIELU(0.8, 0.8, 0.5, 1e-6)).to(device)
 
     # Run benchmarks
     results = []
     results += benchmark_model(xielu_py, input_tensor, "XIELU-Python")
-    #results += benchmark_model(xielu_fn, input_tensor, "XIELU-Python-fn")
     results += benchmark_model(xielu_cuda, input_tensor, "XIELU-CUDA")
 
     # Print results

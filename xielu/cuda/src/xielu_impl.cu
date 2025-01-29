@@ -6,6 +6,8 @@
 #include <ATen/cuda/Atomic.cuh>
 #include <c10/cuda/CUDAGuard.h>
 #include <c10/cuda/CUDAStream.h>
+#include <cuda_bf16.h>
+#include <cuda_fp16.h>
 #include <math.h>
 #include <torch/script.h>
 
@@ -17,7 +19,7 @@ using namespace c10;
 using torch::Tensor;
 using torch::TensorOptions;
 
-#define NWARPS 4
+#define NWARPS 8
 #define WARP_SIZE 32
 
 #define CHECK_RESULT(result)                                                   \
@@ -68,102 +70,39 @@ template <> struct softplus<c10::BFloat16> {
   }
 };
 
-template <typename scalar_t>
-__global__ void forward_kernel(const Accessor<scalar_t, 3> x,
-                               const Accessor<scalar_t, 1> alpha_p,
-                               const Accessor<scalar_t, 1> alpha_n,
-                               const scalar_t beta, const scalar_t eps,
-                               Accessor<scalar_t, 3> output) {
-
-  const int batch_size = x.size(0);
-  const int seq_len = x.size(1);
-  const int hidden_dim = x.size(2);
-  const int total_elements = batch_size * seq_len * hidden_dim;
-
+template <typename scalar_t, typename vector_t>
+__global__ void
+forward_kernel(const scalar_t *__restrict__ x, const int total_elements,
+               const Accessor<scalar_t, 1> alpha_p,
+               const Accessor<scalar_t, 1> alpha_n, const scalar_t beta,
+               const scalar_t eps, scalar_t *__restrict__ output) {
   using sp = softplus<scalar_t>;
   const scalar_t s_alpha_p = sp::f(alpha_p[0]);
   const scalar_t s_alpha_n = sp::f(alpha_n[0]);
 
-  for (int idx = blockIdx.x * blockDim.x + threadIdx.x; idx < total_elements;
-       idx += blockDim.x * gridDim.x) {
+  for (int idx = blockIdx.x * blockDim.x + threadIdx.x * 4;
+       idx < total_elements; idx += blockDim.x * gridDim.x * 4) {
 
-    int batch_idx = idx / (seq_len * hidden_dim);
-    int residual = idx - batch_idx * seq_len * hidden_dim;
-    int seq_idx = residual / hidden_dim;
-    int hidden_idx = residual - seq_idx * hidden_dim;
+    vector_t x_v = *reinterpret_cast<const vector_t *>(&x[idx]);
+    vector_t out;
+    out.x =
+        x_v.x > scalar_t(0.0)
+            ? s_alpha_p * x_v.x * x_v.x + beta * x_v.x
+            : (beta + s_alpha_n) * expm1(min(x_v.x, eps)) - s_alpha_n * x_v.x;
+    out.y =
+        x_v.y > scalar_t(0.0)
+            ? s_alpha_p * x_v.y * x_v.y + beta * x_v.y
+            : (beta + s_alpha_n) * expm1(min(x_v.y, eps)) - s_alpha_n * x_v.y;
+    out.z =
+        x_v.z > scalar_t(0.0)
+            ? s_alpha_p * x_v.z * x_v.z + beta * x_v.z
+            : (beta + s_alpha_n) * expm1(min(x_v.z, eps)) - s_alpha_n * x_v.z;
+    out.w =
+        x_v.w > scalar_t(0.0)
+            ? s_alpha_p * x_v.w * x_v.w + beta * x_v.w
+            : (beta + s_alpha_n) * expm1(min(x_v.w, eps)) - s_alpha_n * x_v.w;
 
-    scalar_t x_e = x[batch_idx][seq_idx][hidden_idx];
-
-    if (static_cast<float>(x_e) > 0.0f) {
-      output[batch_idx][seq_idx][hidden_idx] =
-          s_alpha_p * x_e * x_e + beta * x_e;
-    } else {
-      output[batch_idx][seq_idx][hidden_idx] =
-          (beta + s_alpha_n) * expm1(min(x_e, eps)) - s_alpha_n * x_e;
-    }
-  }
-}
-
-template <typename scalar_t, typename reduction_type>
-__global__ void backward_kernel(const Accessor<scalar_t, 3> x,
-                                const Accessor<scalar_t, 1> alpha_p,
-                                const Accessor<scalar_t, 1> alpha_n,
-                                const Accessor<scalar_t, 3> grad_outputs,
-                                const scalar_t beta, const scalar_t eps,
-                                Accessor<scalar_t, 3> dx,
-                                Accessor<reduction_type, 1> dalpha_p,
-                                Accessor<reduction_type, 1> dalpha_n) {
-
-  const int batch_size = x.size(0);
-  const int seq_len = x.size(1);
-  const int hidden_dim = x.size(2);
-  const int total_elements = batch_size * seq_len * hidden_dim;
-
-  using sp = softplus<scalar_t>;
-  const scalar_t _alpha_p = alpha_p[0];
-  const scalar_t _alpha_n = alpha_n[0];
-
-  const scalar_t s_alpha_p = sp::f(_alpha_p);
-  const scalar_t s_alpha_n = sp::f(_alpha_n);
-
-  reduction_type thread_dalpha_p = 0.0;
-  reduction_type thread_dalpha_n = 0.0;
-
-  for (int idx = blockIdx.x * blockDim.x + threadIdx.x; idx < total_elements;
-       idx += blockDim.x * gridDim.x) {
-
-    int batch_idx = idx / (seq_len * hidden_dim);
-    int residual = idx - batch_idx * seq_len * hidden_dim;
-    int seq_idx = residual / hidden_dim;
-    int hidden_idx = residual - seq_idx * hidden_dim;
-
-    const scalar_t x_e = x[batch_idx][seq_idx][hidden_idx];
-    const scalar_t grad_output = grad_outputs[batch_idx][seq_idx][hidden_idx];
-
-    if (static_cast<float>(x_e) > 0.0f) {
-      dx[batch_idx][seq_idx][hidden_idx] =
-          grad_output * (2 * s_alpha_p * x_e + beta);
-      thread_dalpha_p += grad_output * sp::df(_alpha_p) * x_e * x_e;
-    } else {
-      dx[batch_idx][seq_idx][hidden_idx] =
-          grad_output * ((beta + s_alpha_n) * exp(min(x_e, eps)) - s_alpha_n);
-      thread_dalpha_n +=
-          grad_output * sp::df(_alpha_n) * (expm1(min(x_e, eps)) - x_e);
-    }
-  }
-
-  __syncthreads();
-
-  // reduce thread-local contributions into thread % 32 = 0
-  for (int offset = WARP_SIZE / 2; offset > 0; offset /= 2) {
-    thread_dalpha_p += __shfl_down_sync(0xFFFFFFFF, thread_dalpha_p, offset);
-    thread_dalpha_n += __shfl_down_sync(0xFFFFFFFF, thread_dalpha_n, offset);
-  }
-
-  // write each warp's contributions to grad to gmem
-  if (threadIdx.x % WARP_SIZE == 0) {
-    dalpha_p[blockIdx.x * NWARPS + (threadIdx.x / WARP_SIZE)] = thread_dalpha_p;
-    dalpha_n[blockIdx.x * NWARPS + (threadIdx.x / WARP_SIZE)] = thread_dalpha_n;
+    *reinterpret_cast<vector_t *>(&output[idx]) = out;
   }
 }
 
@@ -203,13 +142,32 @@ torch::Tensor XIELUAutograd::forward(AutogradContext *ctx, Tensor x,
   const auto stream = c10::cuda::getCurrentCUDAStream(x.get_device());
   const c10::cuda::CUDAStreamGuard guard(stream);
 
-  AT_DISPATCH_FLOATING_TYPES_AND2(
-      at::ScalarType::Half, at::ScalarType::BFloat16, x.scalar_type(),
-      "forward", ([&] {
-        forward_kernel<<<numBlocks, blockSize, 0, stream>>>(
-            get_accessor<scalar_t, 3>(x), get_accessor<scalar_t, 1>(alpha_p),
+  // AT_DISPATCH_FLOATING_TYPES_AND2(
+  //     at::ScalarType::Half, at::ScalarType::BFloat16, x.scalar_type(),
+  //     "forward", ([&] {
+  //       forward_kernel<scalar_t><<<numBlocks, blockSize, 0, stream>>>(
+  //           x.data_ptr<scalar_t>(), batch_size * seq_len * hidden_dim,
+  //           get_accessor<scalar_t, 1>(alpha_p),
+  //           get_accessor<scalar_t, 1>(alpha_n), (scalar_t)beta,
+  //           (scalar_t)eps, output.data_ptr<scalar_t>());
+  //     }));
+
+  AT_DISPATCH_FLOATING_TYPES(
+      x.scalar_type(), "forward", ([&] {
+        using vector_t = typename std::conditional<
+            std::is_same<scalar_t, float>::value,
+            float4, // Use float4 for float32
+            typename std::conditional<std::is_same<scalar_t, double>::value,
+                                      double4, // Use double4 for float64
+                                      void     // Unsupported types will cause a
+                                               // compile-time error
+                                      >::type>::type;
+
+        forward_kernel<scalar_t, vector_t><<<numBlocks, blockSize, 0, stream>>>(
+            x.data_ptr<scalar_t>(), batch_size * seq_len * hidden_dim,
+            get_accessor<scalar_t, 1>(alpha_p),
             get_accessor<scalar_t, 1>(alpha_n), (scalar_t)beta, (scalar_t)eps,
-            get_accessor<scalar_t, 3>(output));
+            output.data_ptr<scalar_t>());
       }));
 
   ctx->save_for_backward({x, alpha_p, alpha_n});
@@ -219,6 +177,117 @@ torch::Tensor XIELUAutograd::forward(AutogradContext *ctx, Tensor x,
   POP_RANGE
 
   return output;
+}
+
+template <typename scalar_t, typename reduction_type, typename vector_t>
+__global__ void
+backward_kernel(const scalar_t *__restrict__ x, const int total_elements,
+                const Accessor<scalar_t, 1> alpha_p,
+                const Accessor<scalar_t, 1> alpha_n,
+                const scalar_t *__restrict__ grad_outputs, const scalar_t beta,
+                const scalar_t eps, scalar_t *__restrict__ dx,
+                Accessor<reduction_type, 1> dalpha_p,
+                Accessor<reduction_type, 1> dalpha_n) {
+
+  using sp = softplus<scalar_t>;
+  const scalar_t _alpha_p = alpha_p[0];
+  const scalar_t _alpha_n = alpha_n[0];
+
+  const scalar_t s_alpha_p = sp::f(_alpha_p);
+  const scalar_t s_alpha_n = sp::f(_alpha_n);
+  const scalar_t ds_alpha_p = sp::df(_alpha_p);
+  const scalar_t ds_alpha_n = sp::df(_alpha_n);
+
+  reduction_type thread_dalpha_p = 0.0;
+  reduction_type thread_dalpha_n = 0.0;
+
+  for (int idx = blockIdx.x * blockDim.x + threadIdx.x * 4;
+       idx < total_elements; idx += blockDim.x * gridDim.x * 4) {
+
+    vector_t x_v = *reinterpret_cast<const vector_t *>(&x[idx]);
+
+    vector_t grad_output_v =
+        *reinterpret_cast<const vector_t *>(&grad_outputs[idx]);
+    vector_t dx_v;
+    vector_t dalpha_p_v, dalpha_n_v;
+
+    dx_v.x = x_v.x > scalar_t(0.0)
+                 ? grad_output_v.x * (2 * s_alpha_p * x_v.x + beta)
+                 : grad_output_v.x *
+                       ((beta + s_alpha_n) * exp(min(x_v.x, eps)) - s_alpha_n);
+    dx_v.y = x_v.y > scalar_t(0.0)
+                 ? grad_output_v.y * (2 * s_alpha_p * x_v.y + beta)
+                 : grad_output_v.y *
+                       ((beta + s_alpha_n) * exp(min(x_v.y, eps)) - s_alpha_n);
+
+    dx_v.z = x_v.z > scalar_t(0.0)
+                 ? grad_output_v.z * (2 * s_alpha_p * x_v.z + beta)
+                 : grad_output_v.z *
+                       ((beta + s_alpha_n) * exp(min(x_v.z, eps)) - s_alpha_n);
+
+    dx_v.w = x_v.w > scalar_t(0.0)
+                 ? grad_output_v.w * (2 * s_alpha_p * x_v.w + beta)
+                 : grad_output_v.w *
+                       ((beta + s_alpha_n) * exp(min(x_v.w, eps)) - s_alpha_n);
+
+    dalpha_p_v.x = x_v.x > scalar_t(0.0)
+                       ? grad_output_v.x * ds_alpha_p * x_v.x * x_v.x
+                       : scalar_t(0.0);
+    dalpha_p_v.y = x_v.y > scalar_t(0.0)
+                       ? grad_output_v.y * ds_alpha_p * x_v.y * x_v.y
+                       : scalar_t(0.0);
+    dalpha_p_v.z = x_v.z > scalar_t(0.0)
+                       ? grad_output_v.z * ds_alpha_p * x_v.z * x_v.z
+                       : scalar_t(0.0);
+    dalpha_p_v.w = x_v.w > scalar_t(0.0)
+                       ? grad_output_v.w * ds_alpha_p * x_v.w * x_v.w
+                       : scalar_t(0.0);
+
+    dalpha_n_v.x = x_v.x <= scalar_t(0.0) ? grad_output_v.x * ds_alpha_n *
+                                                (expm1(min(x_v.x, eps)) - x_v.x)
+                                          : scalar_t(0.0);
+    dalpha_n_v.y = x_v.y <= scalar_t(0.0) ? grad_output_v.y * ds_alpha_n *
+                                                (expm1(min(x_v.y, eps)) - x_v.y)
+                                          : scalar_t(0.0);
+    dalpha_n_v.z = x_v.z <= scalar_t(0.0) ? grad_output_v.z * ds_alpha_n *
+                                                (expm1(min(x_v.z, eps)) - x_v.z)
+                                          : scalar_t(0.0);
+    dalpha_n_v.w = x_v.w <= scalar_t(0.0) ? grad_output_v.w * ds_alpha_n *
+                                                (expm1(min(x_v.w, eps)) - x_v.w)
+                                          : scalar_t(0.0);
+
+    *reinterpret_cast<vector_t *>(&dx[idx]) = dx_v;
+
+    thread_dalpha_p +=
+        dalpha_p_v.x + dalpha_p_v.y + dalpha_p_v.z + dalpha_p_v.w;
+    thread_dalpha_n +=
+        dalpha_n_v.x + dalpha_n_v.y + dalpha_n_v.z + dalpha_n_v.w;
+    /*
+      if (static_cast<float>(x_e) > 0.0f) {
+        dx[idx] = grad_output * (2 * s_alpha_p * x_e + beta);
+        thread_dalpha_p += grad_output * sp::df(_alpha_p) * x_e * x_e;
+      } else {
+        dx[idx] =
+            grad_output * ((beta + s_alpha_n) * exp(min(x_e, eps)) - s_alpha_n);
+        thread_dalpha_n +=
+            grad_output * sp::df(_alpha_n) * (expm1(min(x_e, eps)) - x_e);
+      }
+      */
+  }
+
+  __syncthreads();
+
+  // reduce thread-local contributions into thread % 32 = 0
+  for (int offset = WARP_SIZE / 2; offset > 0; offset /= 2) {
+    thread_dalpha_p += __shfl_down_sync(0xFFFFFFFF, thread_dalpha_p, offset);
+    thread_dalpha_n += __shfl_down_sync(0xFFFFFFFF, thread_dalpha_n, offset);
+  }
+
+  // write each warp's contributions to grad to gmem
+  if (threadIdx.x % WARP_SIZE == 0) {
+    dalpha_p[blockIdx.x * NWARPS + (threadIdx.x / WARP_SIZE)] = thread_dalpha_p;
+    dalpha_n[blockIdx.x * NWARPS + (threadIdx.x / WARP_SIZE)] = thread_dalpha_n;
+  }
 }
 
 variable_list XIELUAutograd::backward(AutogradContext *ctx,
@@ -287,27 +356,36 @@ variable_list XIELUAutograd::backward(AutogradContext *ctx,
   const c10::cuda::CUDAStreamGuard guard(stream);
   if (x.scalar_type() == at::ScalarType::Half ||
       x.scalar_type() == at::ScalarType::BFloat16) {
-    AT_DISPATCH_FLOATING_TYPES_AND2(
+    /*AT_DISPATCH_FLOATING_TYPES_AND2(
         at::ScalarType::Half, at::ScalarType::BFloat16, x.scalar_type(),
         "backward", ([&] {
           backward_kernel<scalar_t, float><<<numBlocks, blockSize, 0, stream>>>(
-              get_accessor<scalar_t, 3>(x), get_accessor<scalar_t, 1>(alpha_p),
-              get_accessor<scalar_t, 1>(alpha_n),
-              get_accessor<scalar_t, 3>(grad_outputs[0]), (scalar_t)beta,
-              (scalar_t)eps, get_accessor<scalar_t, 3>(dx),
+              x.data_ptr<scalar_t>(), nbatch * seq_len * hidden_dim,
+       get_accessor<scalar_t, 1>(alpha_p), get_accessor<scalar_t, 1>(alpha_n),
+              grad_outputs[0].data_ptr<scalar_t>(), (scalar_t)beta,
+              (scalar_t)eps, dx.data_ptr<scalar_t>(),
               get_accessor<float, 1>(dalpha_p),
               get_accessor<float, 1>(dalpha_n));
-        }));
+        })); */
   } else {
     AT_DISPATCH_FLOATING_TYPES(
         x.scalar_type(), "backward", ([&] {
-          backward_kernel<scalar_t, scalar_t>
+          using vector_t = typename std::conditional<
+              std::is_same<scalar_t, float>::value,
+              float4, // Use float4 for float32
+              typename std::conditional<std::is_same<scalar_t, double>::value,
+                                        double4, // Use double4 for float64
+                                        void // Unsupported types will cause a
+                                             // compile-time error
+                                        >::type>::type;
+
+          backward_kernel<scalar_t, scalar_t, vector_t>
               <<<numBlocks, blockSize, 0, stream>>>(
-                  get_accessor<scalar_t, 3>(x),
+                  x.data_ptr<scalar_t>(), nbatch * seq_len * hidden_dim,
                   get_accessor<scalar_t, 1>(alpha_p),
                   get_accessor<scalar_t, 1>(alpha_n),
-                  get_accessor<scalar_t, 3>(grad_outputs[0]), (scalar_t)beta,
-                  (scalar_t)eps, get_accessor<scalar_t, 3>(dx),
+                  grad_outputs[0].data_ptr<scalar_t>(), (scalar_t)beta,
+                  (scalar_t)eps, dx.data_ptr<scalar_t>(),
                   get_accessor<scalar_t, 1>(dalpha_p),
                   get_accessor<scalar_t, 1>(dalpha_n));
         }));
