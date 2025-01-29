@@ -269,12 +269,12 @@ variable_list XIELUAutograd::backward(AutogradContext *ctx,
   if (x.scalar_type() == at::ScalarType::Half ||
       x.scalar_type() == at::ScalarType::BFloat16) {
     dalpha_p =
-        torch::empty({1}, options.dtype(torch::kFloat32));
+        torch::zeros({1}, options.dtype(torch::kFloat32));
     dalpha_n =
-        torch::empty({1}, options.dtype(torch::kFloat32));
+        torch::zeros({1}, options.dtype(torch::kFloat32));
   } else {
-    dalpha_p = torch::empty({1}, options);
-    dalpha_n = torch::empty({1}, options);
+    dalpha_p = torch::zeros({1}, options);
+    dalpha_n = torch::zeros({1}, options);
   }
 
   /*might not be needed - can check performance with/without.
