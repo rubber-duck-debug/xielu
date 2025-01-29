@@ -123,7 +123,8 @@ __global__ void backward_kernel(const Accessor<scalar_t, 3> x,
                                 const scalar_t beta, const scalar_t eps,
                                 Accessor<scalar_t, 3> dx,
                                 Accessor<reduction_type, 1> dalpha_p,
-                                Accessor<reduction_type, 1> dalpha_n) {
+                                Accessor<reduction_type, 1> dalpha_n
+                                ) {
 
   const int batch_size = x.size(0);
   const int seq_len = x.size(1);
@@ -175,8 +176,8 @@ __global__ void backward_kernel(const Accessor<scalar_t, 3> x,
 
   // write each warp's contributions to grad to gmem
   if (threadIdx.x % WARP_SIZE == 0) {
-    dalpha_p[blockIdx.x * NWARPS + (threadIdx.x / WARP_SIZE)] = thread_dalpha_p;
-    dalpha_n[blockIdx.x * NWARPS + (threadIdx.x / WARP_SIZE)] = thread_dalpha_n;
+    gpuAtomicAdd(&dalpha_p[0], thread_dalpha_p);
+    gpuAtomicAdd(&dalpha_n[0], thread_dalpha_n);
   }
 }
 
@@ -281,12 +282,12 @@ variable_list XIELUAutograd::backward(AutogradContext *ctx,
   if (x.scalar_type() == at::ScalarType::Half ||
       x.scalar_type() == at::ScalarType::BFloat16) {
     dalpha_p =
-        torch::empty({numBlocks * NWARPS}, options.dtype(torch::kFloat32));
+        torch::empty({1}, options.dtype(torch::kFloat32));
     dalpha_n =
-        torch::empty({numBlocks * NWARPS}, options.dtype(torch::kFloat32));
+        torch::empty({1}, options.dtype(torch::kFloat32));
   } else {
-    dalpha_p = torch::empty({numBlocks * NWARPS}, options);
-    dalpha_n = torch::empty({numBlocks * NWARPS}, options);
+    dalpha_p = torch::empty({1}, options);
+    dalpha_n = torch::empty({1}, options);
   }
 
   /*might not be needed - can check performance with/without.
@@ -326,8 +327,8 @@ variable_list XIELUAutograd::backward(AutogradContext *ctx,
         }));
   }
 
-  torch::Tensor dalpha_p_sum = torch::sum(dalpha_p, 0, true).to(dx.dtype());
-  torch::Tensor dalpha_n_sum = torch::sum(dalpha_n, 0, true).to(dx.dtype());
+  torch::Tensor dalpha_p_sum = dalpha_p.to(dx.dtype());
+  torch::Tensor dalpha_n_sum = dalpha_n.to(dx.dtype());
 
   torch::Tensor undef;
 
