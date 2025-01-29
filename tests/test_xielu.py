@@ -49,14 +49,14 @@ class TestXIELU(unittest.TestCase):
         gradcheck(model, inputs, eps=eps, rtol=rtol, atol=atol, fast_mode=True)
 
     def test_gradients(self):
-        # self.run_gradcheck(self.xielu, (self.input,))
+         self.run_gradcheck(self.xielu, (self.input,))
         self.run_gradcheck(self.xielu_py, (self.input,))
         self.run_gradcheck(self.xielu_fn, (self.input,))
 
     def test_alpha_p_alpha_n_gradients(self):
         self.run_gradcheck(self.xielu_py.forward_test, (self.input, self.xielu_py.alpha_p, self.xielu_py.alpha_n))
         self.run_gradcheck(self.xielu_fn.forward_test, (self.input, self.xielu.alpha_p, self.xielu.alpha_n))
-        # self.run_gradcheck(self.xielu.forward_test, (self.input, self.xielu.alpha_p, self.xielu.alpha_n))
+        self.run_gradcheck(self.xielu.forward_test, (self.input, self.xielu.alpha_p, self.xielu.alpha_n))
 
     def test_edge_cases(self):
         edge_inputs = {
