@@ -17,8 +17,8 @@ INPUT_SIZES = [
 def benchmark_model(model, input_tensor, label):
     results = {}
 
-    torch.cuda.synchronize()
     # Forward pass benchmark
+    torch.cuda.synchronize()
     for _ in range(WARMUP_ITERS):
         _ = model(input_tensor)
     torch.cuda.synchronize()
@@ -35,6 +35,7 @@ def benchmark_model(model, input_tensor, label):
     torch.cuda.synchronize()
 
     # Backward pass benchmark
+    torch.cuda.synchronize()
     input_tensor.requires_grad_(True)
     output = model(input_tensor)
     grad_output = torch.ones_like(output)
@@ -58,8 +59,8 @@ def benchmark_model(model, input_tensor, label):
 def format_results(results):
     """Format and print benchmark results in a clean table."""
     print("\nBenchmark Results:")
-    print(f"{'Model':<30}{'Batch':<10}{'SeqLen':<10}{'HiddenDim':<15}{'Fwd (ms)':<15}{'Bwd (ms)':<15}")
-    print("=" * 90)
+    print(f"{'Model':<14}{'Batch':>10}{'SeqLen':>10}{'HiddenDim':>10}{'Fwd (ms)':>10}{'Bwd (ms)':>10}")
+    print("=" * 64)
 
     prev_batch, prev_seq_len, prev_hidden_dim = None, None, None
     for (label, result, batch, seq_len, hidden_dim) in results:
@@ -68,7 +69,7 @@ def format_results(results):
             prev_batch, prev_seq_len, prev_hidden_dim = batch, seq_len, hidden_dim
         fwd_time = f"{result['forward'].mean * 1000:.2f}"
         bwd_time = f"{result['backward'].mean * 1000:.2f}"
-        print(f"{label:<30}{batch:>10}{seq_len:>10}{hidden_dim:>15}{fwd_time:>15}{bwd_time:>15}")
+        print(f"{label:<14}{batch:>10}{seq_len:>10}{hidden_dim:>10}{fwd_time:>10}{bwd_time:>10}")
 
 
 def run_benchmarks():
