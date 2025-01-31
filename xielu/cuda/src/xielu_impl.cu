@@ -194,7 +194,7 @@ backward_kernel(const scalar_t *__restrict__ x, const int total_elements,
   const scalar_t _alpha_n = alpha_n[0];
 
   const scalar_t s_alpha_p = sp::f(_alpha_p);
-  const scalar_t s_alpha_n = sp::f(_alpha_n);
+  const scalar_t s_alpha_n = beta + sp::f(_alpha_n);
   const scalar_t ds_alpha_p = sp::df(_alpha_p);
   const scalar_t ds_alpha_n = sp::df(_alpha_n);
 
@@ -214,21 +214,21 @@ backward_kernel(const scalar_t *__restrict__ x, const int total_elements,
     dx_v.x = x_v.x > scalar_t(0.0)
                  ? grad_output_v.x * (2 * s_alpha_p * x_v.x + beta)
                  : grad_output_v.x *
-                       ((beta + s_alpha_n) * exp(min(x_v.x, eps)) - s_alpha_n);
+                       (s_alpha_n * expm1(min(x_v.x, eps)) + beta);
     dx_v.y = x_v.y > scalar_t(0.0)
                  ? grad_output_v.y * (2 * s_alpha_p * x_v.y + beta)
                  : grad_output_v.y *
-                       ((beta + s_alpha_n) * exp(min(x_v.y, eps)) - s_alpha_n);
+                       (s_alpha_n * expm1(min(x_v.y, eps)) + beta);
 
     dx_v.z = x_v.z > scalar_t(0.0)
                  ? grad_output_v.z * (2 * s_alpha_p * x_v.z + beta)
                  : grad_output_v.z *
-                       ((beta + s_alpha_n) * exp(min(x_v.z, eps)) - s_alpha_n);
+                       (s_alpha_n * expm1(min(x_v.z, eps)) + beta);
 
     dx_v.w = x_v.w > scalar_t(0.0)
                  ? grad_output_v.w * (2 * s_alpha_p * x_v.w + beta)
                  : grad_output_v.w *
-                       ((beta + s_alpha_n) * exp(min(x_v.w, eps)) - s_alpha_n);
+                       (s_alpha_n * expm1(min(x_v.w, eps)) + beta);
 
     dalpha_p_v.x = x_v.x > scalar_t(0.0)
                        ? grad_output_v.x * ds_alpha_p * x_v.x * x_v.x

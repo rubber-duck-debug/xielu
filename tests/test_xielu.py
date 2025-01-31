@@ -1,5 +1,4 @@
 import unittest
-import pytest
 import torch
 from torch.autograd import gradcheck
 from xielu.ops.wrappers import XIELUPy, XIELUfn, XIELU
