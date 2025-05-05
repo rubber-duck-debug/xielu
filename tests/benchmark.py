@@ -11,7 +11,6 @@ INPUT_SIZES = [
     ( 16,   64,  512),
     ( 32,  128, 1024),
     (  5, 4096, 8192),
-    ( 50, 4096, 8192),
 ]
 
 def benchmark_model(model, input_tensor, label):
