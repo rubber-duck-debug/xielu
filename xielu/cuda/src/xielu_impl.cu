@@ -39,6 +39,12 @@ static int getMaxBlocks() {
   return numMultiprocessors * 4;
 }
 
+/* specialized structure for vectorized loads with half, bfloat16 types */
+template <typename T> struct vec4 { T x, y, z, w; };
+
+using half4 = vec4<c10::Half>;
+using bfloat4 = vec4<c10::BFloat16>;
+
 template <typename T> struct softplus {
   static __device__ T f(T x) {
     return x > T(20.0) ? x : (x < T(-20.0) ? T(0.0) : log1p(exp(x)));
@@ -70,6 +76,23 @@ template <> struct softplus<c10::BFloat16> {
   }
 };
 
+// Generic overload: cast to float
+template <typename T> __device__ __forceinline__ float to_float_if_needed(T x) {
+  return static_cast<float>(x);
+}
+
+// Overload for float: return as-is
+__device__ __forceinline__ float to_float_if_needed(float x) { return x; }
+
+// Overload for double: return as-is
+__device__ __forceinline__ double to_float_if_needed(double x) { return x; }
+
+template <typename scalar_t>
+__device__ __forceinline__ scalar_t compute_expm1(const scalar_t x) {
+  float x_f = to_float_if_needed(x);
+  return static_cast<scalar_t>(expf(x_f) - 1.0f);
+}
+
 template <typename scalar_t, typename vector_t>
 __global__ void
 forward_kernel(const scalar_t *__restrict__ x, const int total_elements,
@@ -80,29 +103,27 @@ forward_kernel(const scalar_t *__restrict__ x, const int total_elements,
   const scalar_t s_alpha_p = sp::f(alpha_p[0]);
   const scalar_t s_alpha_n = sp::f(alpha_n[0]);
 
-  for (int idx = blockIdx.x * blockDim.x + threadIdx.x * 4;
-       idx < total_elements; idx += blockDim.x * gridDim.x * 4) {
+  int idx = blockIdx.x * blockDim.x + threadIdx.x;
 
-    vector_t x_v = *reinterpret_cast<const vector_t *>(&x[idx]);
+  for (int i = idx; i < total_elements / 4; i += blockDim.x * gridDim.x) {
+
+    vector_t x_v = reinterpret_cast<const vector_t *>(x)[i];
     vector_t out;
-    out.x =
-        x_v.x > scalar_t(0.0)
-            ? s_alpha_p * x_v.x * x_v.x + beta * x_v.x
-            : (beta + s_alpha_n) * expm1(min(x_v.x, eps)) - s_alpha_n * x_v.x;
-    out.y =
-        x_v.y > scalar_t(0.0)
-            ? s_alpha_p * x_v.y * x_v.y + beta * x_v.y
-            : (beta + s_alpha_n) * expm1(min(x_v.y, eps)) - s_alpha_n * x_v.y;
-    out.z =
-        x_v.z > scalar_t(0.0)
-            ? s_alpha_p * x_v.z * x_v.z + beta * x_v.z
-            : (beta + s_alpha_n) * expm1(min(x_v.z, eps)) - s_alpha_n * x_v.z;
-    out.w =
-        x_v.w > scalar_t(0.0)
-            ? s_alpha_p * x_v.w * x_v.w + beta * x_v.w
-            : (beta + s_alpha_n) * expm1(min(x_v.w, eps)) - s_alpha_n * x_v.w;
 
-    *reinterpret_cast<vector_t *>(&output[idx]) = out;
+#define COMPUTE(v)                                                             \
+  (to_float_if_needed(v) > scalar_t(0.0)                                       \
+       ? v * (s_alpha_p * v + beta)                                            \
+       : (beta + s_alpha_n) * compute_expm1<scalar_t>(min(v, eps)) -           \
+             s_alpha_n * v)
+
+    out.x = COMPUTE(x_v.x);
+    out.y = COMPUTE(x_v.y);
+    out.z = COMPUTE(x_v.z);
+    out.w = COMPUTE(x_v.w);
+
+#undef COMPUTE
+
+    reinterpret_cast<vector_t *>(output)[i] = out;
   }
 }
 
@@ -129,12 +150,13 @@ torch::Tensor XIELUAutograd::forward(AutogradContext *ctx, Tensor x,
   const int batch_size = x.size(0);
   const int seq_len = x.size(1);
   const int hidden_dim = x.size(2);
+  const int nelements = batch_size * seq_len * hidden_dim;
+
+  TORCH_CHECK(hidden_dim % 4 == 0, "hidden_dim must be a multiple of 4");
 
   const int blockSize = NWARPS * WARP_SIZE;
-  const int numBlocks =
-      max(1, min(getMaxBlocks(),
-                 ((batch_size * seq_len * hidden_dim) + blockSize - 1) /
-                     blockSize));
+  const int numBlocks = max(
+      1, min(getMaxBlocks(), ((nelements / 4) + blockSize - 1) / blockSize));
 
   TensorOptions options = x.options();
   Tensor output = torch::empty_like(x);
@@ -142,26 +164,20 @@ torch::Tensor XIELUAutograd::forward(AutogradContext *ctx, Tensor x,
   const auto stream = c10::cuda::getCurrentCUDAStream(x.get_device());
   const c10::cuda::CUDAStreamGuard guard(stream);
 
-  // AT_DISPATCH_FLOATING_TYPES_AND2(
-  //     at::ScalarType::Half, at::ScalarType::BFloat16, x.scalar_type(),
-  //     "forward", ([&] {
-  //       forward_kernel<scalar_t><<<numBlocks, blockSize, 0, stream>>>(
-  //           x.data_ptr<scalar_t>(), batch_size * seq_len * hidden_dim,
-  //           get_accessor<scalar_t, 1>(alpha_p),
-  //           get_accessor<scalar_t, 1>(alpha_n), (scalar_t)beta,
-  //           (scalar_t)eps, output.data_ptr<scalar_t>());
-  //     }));
-
-  AT_DISPATCH_FLOATING_TYPES(
-      x.scalar_type(), "forward", ([&] {
+  AT_DISPATCH_FLOATING_TYPES_AND2(
+      at::ScalarType::Half, at::ScalarType::BFloat16, x.scalar_type(),
+      "forward", ([&] {
         using vector_t = typename std::conditional<
-            std::is_same<scalar_t, float>::value,
-            float4, // Use float4 for float32
-            typename std::conditional<std::is_same<scalar_t, double>::value,
-                                      double4, // Use double4 for float64
-                                      void     // Unsupported types will cause a
-                                               // compile-time error
-                                      >::type>::type;
+            std::is_same<scalar_t, float>::value, float4,
+            typename std::conditional<
+                std::is_same<scalar_t, double>::value, double4,
+                typename std::conditional<
+                    std::is_same<scalar_t, c10::Half>::value, half4,
+                    typename std::conditional<
+                        std::is_same<scalar_t, c10::BFloat16>::value, bfloat4,
+                        void>::type>::type>::type>::type;
+
+        static_assert(!std::is_same<vector_t, void>::value, "Unsupported type");
 
         forward_kernel<scalar_t, vector_t><<<numBlocks, blockSize, 0, stream>>>(
             x.data_ptr<scalar_t>(), batch_size * seq_len * hidden_dim,
@@ -198,37 +214,38 @@ backward_kernel(const scalar_t *__restrict__ x, const int total_elements,
   const scalar_t ds_alpha_p = sp::df(_alpha_p);
   const scalar_t ds_alpha_n = sp::df(_alpha_n);
 
-  reduction_type thread_dalpha_p = 0.0;
-  reduction_type thread_dalpha_n = 0.0;
+  reduction_type thread_dalpha_p = reduction_type(0.0);
+  reduction_type thread_dalpha_n = reduction_type(0.0);
 
-  for (int idx = blockIdx.x * blockDim.x + threadIdx.x * 4;
-       idx < total_elements; idx += blockDim.x * gridDim.x * 4) {
+  int idx = blockIdx.x * blockDim.x + threadIdx.x;
 
-    vector_t x_v = *reinterpret_cast<const vector_t *>(&x[idx]);
+  for (int i = idx; i < total_elements / 4; i += blockDim.x * gridDim.x) {
+
+    vector_t x_v = reinterpret_cast<const vector_t *>(x)[i];
 
     vector_t grad_output_v =
-        *reinterpret_cast<const vector_t *>(&grad_outputs[idx]);
+        reinterpret_cast<const vector_t *>(grad_outputs)[i];
     vector_t dx_v;
     vector_t dalpha_p_v, dalpha_n_v;
 
-    dx_v.x = x_v.x > scalar_t(0.0)
-                 ? grad_output_v.x * (2 * s_alpha_p * x_v.x + beta)
-                 : grad_output_v.x *
-                       (s_alpha_n * expm1(min(x_v.x, eps)) + beta);
-    dx_v.y = x_v.y > scalar_t(0.0)
-                 ? grad_output_v.y * (2 * s_alpha_p * x_v.y + beta)
-                 : grad_output_v.y *
-                       (s_alpha_n * expm1(min(x_v.y, eps)) + beta);
+    dx_v.x =
+        x_v.x > scalar_t(0.0)
+            ? grad_output_v.x * (2 * s_alpha_p * x_v.x + beta)
+            : grad_output_v.x * (s_alpha_n * expm1(min(x_v.x, eps)) + beta);
+    dx_v.y =
+        x_v.y > scalar_t(0.0)
+            ? grad_output_v.y * (2 * s_alpha_p * x_v.y + beta)
+            : grad_output_v.y * (s_alpha_n * expm1(min(x_v.y, eps)) + beta);
 
-    dx_v.z = x_v.z > scalar_t(0.0)
-                 ? grad_output_v.z * (2 * s_alpha_p * x_v.z + beta)
-                 : grad_output_v.z *
-                       (s_alpha_n * expm1(min(x_v.z, eps)) + beta);
+    dx_v.z =
+        x_v.z > scalar_t(0.0)
+            ? grad_output_v.z * (2 * s_alpha_p * x_v.z + beta)
+            : grad_output_v.z * (s_alpha_n * expm1(min(x_v.z, eps)) + beta);
 
-    dx_v.w = x_v.w > scalar_t(0.0)
-                 ? grad_output_v.w * (2 * s_alpha_p * x_v.w + beta)
-                 : grad_output_v.w *
-                       (s_alpha_n * expm1(min(x_v.w, eps)) + beta);
+    dx_v.w =
+        x_v.w > scalar_t(0.0)
+            ? grad_output_v.w * (2 * s_alpha_p * x_v.w + beta)
+            : grad_output_v.w * (s_alpha_n * expm1(min(x_v.w, eps)) + beta);
 
     dalpha_p_v.x = x_v.x > scalar_t(0.0)
                        ? grad_output_v.x * ds_alpha_p * x_v.x * x_v.x
@@ -256,7 +273,7 @@ backward_kernel(const scalar_t *__restrict__ x, const int total_elements,
                                                 (expm1(min(x_v.w, eps)) - x_v.w)
                                           : scalar_t(0.0);
 
-    *reinterpret_cast<vector_t *>(&dx[idx]) = dx_v;
+    reinterpret_cast<vector_t *>(dx)[i] = dx_v;
 
     thread_dalpha_p +=
         dalpha_p_v.x + dalpha_p_v.y + dalpha_p_v.z + dalpha_p_v.w;
@@ -279,14 +296,17 @@ backward_kernel(const scalar_t *__restrict__ x, const int total_elements,
 
   // reduce thread-local contributions into thread % 32 = 0
   for (int offset = WARP_SIZE / 2; offset > 0; offset /= 2) {
-    thread_dalpha_p += __shfl_down_sync(0xFFFFFFFF, thread_dalpha_p, offset);
-    thread_dalpha_n += __shfl_down_sync(0xFFFFFFFF, thread_dalpha_n, offset);
+    thread_dalpha_p += __shfl_down_sync(0xffffffff, thread_dalpha_p, offset);
+    thread_dalpha_n += __shfl_down_sync(0xffffffff, thread_dalpha_n, offset);
   }
 
   // write each warp's contributions to grad to gmem
   if (threadIdx.x % WARP_SIZE == 0) {
-    dalpha_p[blockIdx.x * NWARPS + (threadIdx.x / WARP_SIZE)] = thread_dalpha_p;
-    dalpha_n[blockIdx.x * NWARPS + (threadIdx.x / WARP_SIZE)] = thread_dalpha_n;
+    // dalpha_p[blockIdx.x * NWARPS + (threadIdx.x / WARP_SIZE)] =
+    // thread_dalpha_p; dalpha_n[blockIdx.x * NWARPS + (threadIdx.x /
+    // WARP_SIZE)] = thread_dalpha_n;
+    gpuAtomicAdd(&dalpha_p[0], thread_dalpha_p);
+    gpuAtomicAdd(&dalpha_n[0], thread_dalpha_n);
   }
 }
 
@@ -319,11 +339,13 @@ variable_list XIELUAutograd::backward(AutogradContext *ctx,
   const int nbatch = x.size(0);
   const int seq_len = x.size(1);
   const int hidden_dim = x.size(2);
+  const int nelements = nbatch * seq_len * hidden_dim;
+
+  TORCH_CHECK(hidden_dim % 4 == 0, "hidden_dim must be a multiple of 4");
 
   const int blockSize = NWARPS * WARP_SIZE;
   const int numBlocks = max(
-      1, min(getMaxBlocks(),
-             ((nbatch * seq_len * hidden_dim) + blockSize - 1) / blockSize));
+      1, min(getMaxBlocks(), ((nelements / 4) + blockSize - 1) / blockSize));
 
   TensorOptions options = x.options();
 
@@ -336,60 +358,50 @@ variable_list XIELUAutograd::backward(AutogradContext *ctx,
 
   if (x.scalar_type() == at::ScalarType::Half ||
       x.scalar_type() == at::ScalarType::BFloat16) {
-    dalpha_p =
-        torch::empty({numBlocks * NWARPS}, options.dtype(torch::kFloat32));
-    dalpha_n =
-        torch::empty({numBlocks * NWARPS}, options.dtype(torch::kFloat32));
+    dalpha_p = torch::zeros({1}, options.dtype(torch::kFloat32));
+    dalpha_n = torch::zeros({1}, options.dtype(torch::kFloat32));
   } else {
-    dalpha_p = torch::empty({numBlocks * NWARPS}, options);
-    dalpha_n = torch::empty({numBlocks * NWARPS}, options);
+    dalpha_p = torch::zeros({1}, options);
+    dalpha_n = torch::zeros({1}, options);
   }
-
-  /*might not be needed - can check performance with/without.
-  (contiguity isn't guaranteed for grad_outputs!)
-  */
 
   if (!grad_outputs[0].is_contiguous())
     grad_outputs[0] = grad_outputs[0].contiguous();
 
   const auto stream = c10::cuda::getCurrentCUDAStream(x.get_device());
   const c10::cuda::CUDAStreamGuard guard(stream);
-  if (x.scalar_type() == at::ScalarType::Half ||
-      x.scalar_type() == at::ScalarType::BFloat16) {
-    /*AT_DISPATCH_FLOATING_TYPES_AND2(
-        at::ScalarType::Half, at::ScalarType::BFloat16, x.scalar_type(),
-        "backward", ([&] {
-          backward_kernel<scalar_t, float><<<numBlocks, blockSize, 0, stream>>>(
-              x.data_ptr<scalar_t>(), nbatch * seq_len * hidden_dim,
-       get_accessor<scalar_t, 1>(alpha_p), get_accessor<scalar_t, 1>(alpha_n),
-              grad_outputs[0].data_ptr<scalar_t>(), (scalar_t)beta,
-              (scalar_t)eps, dx.data_ptr<scalar_t>(),
-              get_accessor<float, 1>(dalpha_p),
-              get_accessor<float, 1>(dalpha_n));
-        })); */
-  } else {
-    AT_DISPATCH_FLOATING_TYPES(
-        x.scalar_type(), "backward", ([&] {
-          using vector_t = typename std::conditional<
-              std::is_same<scalar_t, float>::value,
-              float4, // Use float4 for float32
-              typename std::conditional<std::is_same<scalar_t, double>::value,
-                                        double4, // Use double4 for float64
-                                        void // Unsupported types will cause a
-                                             // compile-time error
-                                        >::type>::type;
 
-          backward_kernel<scalar_t, scalar_t, vector_t>
-              <<<numBlocks, blockSize, 0, stream>>>(
-                  x.data_ptr<scalar_t>(), nbatch * seq_len * hidden_dim,
-                  get_accessor<scalar_t, 1>(alpha_p),
-                  get_accessor<scalar_t, 1>(alpha_n),
-                  grad_outputs[0].data_ptr<scalar_t>(), (scalar_t)beta,
-                  (scalar_t)eps, dx.data_ptr<scalar_t>(),
-                  get_accessor<scalar_t, 1>(dalpha_p),
-                  get_accessor<scalar_t, 1>(dalpha_n));
-        }));
-  }
+  // AT_DISPATCH_FLOATING_TYPES_AND2(
+  //     at::ScalarType::Half, at::ScalarType::BFloat16, x.scalar_type(),
+  AT_DISPATCH_FLOATING_TYPES(
+      x.scalar_type(), "backward", ([&] {
+        using vector_t = typename std::conditional<
+            std::is_same<scalar_t, float>::value, float4,
+            typename std::conditional<
+                std::is_same<scalar_t, double>::value, double4,
+                typename std::conditional<
+                    std::is_same<scalar_t, c10::Half>::value, half4,
+                    typename std::conditional<
+                        std::is_same<scalar_t, c10::BFloat16>::value, bfloat4,
+                        void>::type>::type>::type>::type;
+
+        static_assert(!std::is_same<vector_t, void>::value, "Unsupported type");
+
+        using reduction_t = typename std::conditional<
+            std::is_same<scalar_t, c10::Half>::value ||
+                std::is_same<scalar_t, c10::BFloat16>::value,
+            float, scalar_t>::type;
+
+        backward_kernel<scalar_t, reduction_t, vector_t>
+            <<<numBlocks, blockSize, 0, stream>>>(
+                x.data_ptr<scalar_t>(), nbatch * seq_len * hidden_dim,
+                get_accessor<scalar_t, 1>(alpha_p),
+                get_accessor<scalar_t, 1>(alpha_n),
+                grad_outputs[0].data_ptr<scalar_t>(), (scalar_t)beta,
+                (scalar_t)eps, dx.data_ptr<scalar_t>(),
+                get_accessor<scalar_t, 1>(dalpha_p),
+                get_accessor<scalar_t, 1>(dalpha_n));
+      }));
 
   torch::Tensor dalpha_p_sum = torch::sum(dalpha_p, 0, true).to(dx.dtype());
   torch::Tensor dalpha_n_sum = torch::sum(dalpha_n, 0, true).to(dx.dtype());
