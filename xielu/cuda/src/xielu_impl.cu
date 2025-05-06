@@ -287,17 +287,6 @@ backward_kernel(const scalar_t *__restrict__ x, const int total_elements,
         dalpha_p_v.x + dalpha_p_v.y + dalpha_p_v.z + dalpha_p_v.w;
     thread_dalpha_n +=
         dalpha_n_v.x + dalpha_n_v.y + dalpha_n_v.z + dalpha_n_v.w;
-    /*
-      if (static_cast<float>(x_e) > 0.0f) {
-        dx[idx] = grad_output * (2 * s_alpha_p * x_e + beta);
-        thread_dalpha_p += grad_output * sp::df(_alpha_p) * x_e * x_e;
-      } else {
-        dx[idx] =
-            grad_output * ((beta + s_alpha_n) * exp(min(x_e, eps)) - s_alpha_n);
-        thread_dalpha_n +=
-            grad_output * sp::df(_alpha_n) * (expm1(min(x_e, eps)) - x_e);
-      }
-      */
   }
 
   __syncthreads();
@@ -418,5 +407,5 @@ variable_list XIELUAutograd::backward(AutogradContext *ctx,
 
   POP_RANGE
 
-  return {dx, dalpha_p, dalpha_n, undef, undef};
+  return {dx, dalpha_p.to(x.dtype()), dalpha_n.to(x.dtype()), undef, undef};
 }
