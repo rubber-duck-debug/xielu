@@ -18,7 +18,7 @@ with_vector_loads = True
 
 device = torch.device("cuda")
 ref_dtype = torch.float32
-dtype = torch.bfloat16
+dtype = torch.float32
 
 input = torch.randn(
     NBATCH,
@@ -29,15 +29,15 @@ input = torch.randn(
     requires_grad=True,
 )
 
-input_fp16 = input.clone().detach().to(dtype).requires_grad_(True)
+input_reduced = input.clone().detach().to(dtype).requires_grad_(True)
 
 xielu_py = XIELUPy(alpha_p_init, alpha_n_init,
                    beta, eps, device, input.dtype)
 
 xielu = XIELU(alpha_p_init, alpha_n_init,
-              beta, eps, device, input_fp16.dtype, with_vector_loads=with_vector_loads)
+              beta, eps, device, input_reduced.dtype, with_vector_loads=with_vector_loads)
 
-out_cuda = xielu.forward(input_fp16)
+out_cuda = xielu.forward(input_reduced)
 out_py = xielu_py.forward(input)
 
 print("mean output error...")
@@ -49,12 +49,15 @@ out_cuda.backward(grad_output_cuda, retain_graph=True)
 grad_output_py = torch.ones_like(out_py)
 out_py.backward(grad_output_py, retain_graph=True)
 
-print(input_fp16.grad)
-print(input.grad)
-print(input_fp16.grad - input.grad)
+print("mean input.grad error...")
+print((input_reduced.grad - input.grad).abs().mean())
 
-print(xielu_py.alpha_n.grad)
-print(xielu.alpha_n.grad)
-
+print("alpha_p error...")
 print(xielu_py.alpha_p.grad)
 print(xielu.alpha_p.grad)
+print((xielu_py.alpha_p.grad - xielu.alpha_p.grad).abs().mean())
+
+print("alpha_n error...")
+print(xielu_py.alpha_n.grad)
+print(xielu.alpha_n.grad)
+print((xielu_py.alpha_n.grad - xielu.alpha_n.grad).abs().mean())
