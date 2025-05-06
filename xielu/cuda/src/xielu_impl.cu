@@ -397,8 +397,8 @@ variable_list XIELUAutograd::backward(AutogradContext *ctx,
                 get_accessor<scalar_t, 1>(alpha_n),
                 grad_outputs[0].data_ptr<scalar_t>(), (scalar_t)beta,
                 (scalar_t)eps, dx.data_ptr<scalar_t>(),
-                get_accessor<scalar_t, 1>(dalpha_p),
-                get_accessor<scalar_t, 1>(dalpha_n));
+                get_accessor<reduction_t, 1>(dalpha_p),
+                get_accessor<reduction_t, 1>(dalpha_n));
       }));
 
   // torch::Tensor dalpha_p_sum = torch::sum(dalpha_p, 0, true).to(dx.dtype());
