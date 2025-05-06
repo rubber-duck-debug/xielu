@@ -368,10 +368,11 @@ variable_list XIELUAutograd::backward(AutogradContext *ctx,
   const auto stream = c10::cuda::getCurrentCUDAStream(x.get_device());
   const c10::cuda::CUDAStreamGuard guard(stream);
 
-  // AT_DISPATCH_FLOATING_TYPES_AND2(
-  //     at::ScalarType::Half, at::ScalarType::BFloat16, x.scalar_type(),
-  AT_DISPATCH_FLOATING_TYPES(
-      x.scalar_type(), "backward", ([&] {
+  AT_DISPATCH_FLOATING_TYPES_AND2(
+      at::ScalarType::Half, at::ScalarType::BFloat16, x.scalar_type(),
+      // AT_DISPATCH_FLOATING_TYPES(
+      // x.scalar_type(),
+      "backward", ([&] {
         using vector_t = typename std::conditional<
             std::is_same<scalar_t, float>::value, float4,
             typename std::conditional<
