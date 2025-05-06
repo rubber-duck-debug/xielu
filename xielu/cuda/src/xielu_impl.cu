@@ -115,10 +115,12 @@ __global__ void vectorised_xielu_forward_impl(
   const scalar_t s_alpha_p = sp::f(alpha_p[0]);
   const scalar_t s_alpha_n = sp::f(alpha_n[0]);
 
-  for (int idx = blockIdx.x * blockDim.x + threadIdx.x * 4;
-       idx < total_elements; idx += blockDim.x * gridDim.x * 4) {
+  for (int vec_idx = blockIdx.x * blockDim.x + threadIdx.x;
+       vec_idx < total_elements / 4; vec_idx += blockDim.x * gridDim.x) {
 
-    vector_t x_v = *reinterpret_cast<const vector_t *>(&x[idx]);
+    int base_idx = vec_idx * 4;
+
+    vector_t x_v = *reinterpret_cast<const vector_t *>(&x[base_idx]);
     vector_t out;
 
     out.x = compute(x_v.x, s_alpha_p, s_alpha_n, beta, eps);
@@ -126,7 +128,7 @@ __global__ void vectorised_xielu_forward_impl(
     out.z = compute(x_v.z, s_alpha_p, s_alpha_n, beta, eps);
     out.w = compute(x_v.w, s_alpha_p, s_alpha_n, beta, eps);
 
-    *reinterpret_cast<vector_t *>(&output[idx]) = out;
+    *reinterpret_cast<vector_t *>(&output[base_idx]) = out;
   }
 }
 
@@ -146,6 +148,88 @@ xielu_forward_impl(const scalar_t *__restrict__ x, const int total_elements,
     scalar_t out = compute(x_v, s_alpha_p, s_alpha_n, beta, eps);
     output[i] = out;
   }
+}
+
+torch::Tensor XIELUAutograd::forward(AutogradContext *ctx, Tensor x,
+                                     Tensor alpha_p, Tensor alpha_n,
+                                     double beta, double eps,
+                                     bool with_vector_loads) {
+
+  PUSH_RANGE("XIELU_FWD", 0)
+
+  TORCH_CHECK(x.is_cuda(), "Input tensor x must be on the CUDA device.");
+  TORCH_CHECK(alpha_p.is_cuda(),
+              "Input tensor alpha_p must be on the CUDA device.");
+  TORCH_CHECK(alpha_n.is_cuda(),
+              "Input tensor alpha_n must be on the CUDA device.");
+  TORCH_CHECK(alpha_p.dim() == 1 && alpha_p.numel() == 1,
+              "alpha_p must be a 1-D tensor with one element.");
+  TORCH_CHECK(alpha_n.dim() == 1 && alpha_n.numel() == 1,
+              "alpha_n must be a 1-D tensor with one element.");
+  TORCH_CHECK(x.dtype() == alpha_p.dtype(), "Data type of x (", x.dtype(),
+              ") must match data type of alpha_p (", alpha_p.dtype(), ").");
+  TORCH_CHECK(x.dtype() == alpha_n.dtype(), "Data type of x (", x.dtype(),
+              ") must match data type of alpha_n (", alpha_n.dtype(), ").");
+
+  const int batch_size = x.size(0);
+  const int seq_len = x.size(1);
+  const int hidden_dim = x.size(2);
+  const int nelements = batch_size * seq_len * hidden_dim;
+
+  TORCH_CHECK(hidden_dim % 4 == 0, "hidden_dim must be a multiple of 4");
+
+  const int blockSize = NWARPS * WARP_SIZE;
+  const int elements_per_thread = with_vector_loads ? 4 : 1;
+  const int adjusted_elements = nelements / elements_per_thread;
+  const int numBlocks = max(
+      1, min(getMaxBlocks(), (adjusted_elements + blockSize - 1) / blockSize));
+
+  TensorOptions options = x.options();
+  Tensor output = torch::empty_like(x);
+
+  const auto stream = c10::cuda::getCurrentCUDAStream(x.get_device());
+  const c10::cuda::CUDAStreamGuard guard(stream);
+
+  AT_DISPATCH_FLOATING_TYPES_AND2(
+      at::ScalarType::Half, at::ScalarType::BFloat16, x.scalar_type(),
+      "forward", ([&] {
+        using vector_t = typename std::conditional<
+            std::is_same<scalar_t, float>::value, float4,
+            typename std::conditional<
+                std::is_same<scalar_t, double>::value, double4,
+                typename std::conditional<
+                    std::is_same<scalar_t, c10::Half>::value, half4,
+                    typename std::conditional<
+                        std::is_same<scalar_t, c10::BFloat16>::value, bfloat4,
+                        void>::type>::type>::type>::type;
+
+        static_assert(!std::is_same<vector_t, void>::value, "Unsupported type");
+
+        if (with_vector_loads) {
+          vectorised_xielu_forward_impl<scalar_t, vector_t>
+              <<<numBlocks, blockSize, 0, stream>>>(
+                  x.data_ptr<scalar_t>(), nelements,
+                  get_accessor<scalar_t, 1>(alpha_p),
+                  get_accessor<scalar_t, 1>(alpha_n), (scalar_t)beta,
+                  (scalar_t)eps, output.data_ptr<scalar_t>());
+        } else {
+
+          xielu_forward_impl<scalar_t><<<numBlocks, blockSize, 0, stream>>>(
+              x.data_ptr<scalar_t>(), nelements,
+              get_accessor<scalar_t, 1>(alpha_p),
+              get_accessor<scalar_t, 1>(alpha_n), (scalar_t)beta, (scalar_t)eps,
+              output.data_ptr<scalar_t>());
+        }
+      }));
+
+  ctx->save_for_backward({x, alpha_p, alpha_n});
+  ctx->saved_data["eps"] = eps;
+  ctx->saved_data["beta"] = beta;
+  ctx->saved_data["with_vector_loads"] = with_vector_loads;
+
+  POP_RANGE
+
+  return output;
 }
 
 template <typename scalar_t>
@@ -195,13 +279,15 @@ __global__ void vectorised_xielu_backward_impl(
   reduction_type thread_dalpha_p = reduction_type(0.0);
   reduction_type thread_dalpha_n = reduction_type(0.0);
 
-  for (int i = blockIdx.x * blockDim.x + threadIdx.x * 4; i < total_elements;
-       i += blockDim.x * gridDim.x * 4) {
+  for (int vec_idx = blockIdx.x * blockDim.x + threadIdx.x;
+       vec_idx < total_elements / 4; vec_idx += blockDim.x * gridDim.x) {
 
-    vector_t x_v = *reinterpret_cast<const vector_t *>(&x[i]);
+    int base_idx = vec_idx * 4;
+
+    vector_t x_v = *reinterpret_cast<const vector_t *>(&x[base_idx]);
 
     vector_t grad_output_v =
-        *reinterpret_cast<const vector_t *>(&grad_outputs[i]);
+        *reinterpret_cast<const vector_t *>(&grad_outputs[base_idx]);
     vector_t dx_v;
     vector_t dalpha_p_v, dalpha_n_v;
 
@@ -224,7 +310,7 @@ __global__ void vectorised_xielu_backward_impl(
     dalpha_n_v.z = compute_dn(x_v.z, grad_output_v.z, ds_alpha_n, eps);
     dalpha_n_v.w = compute_dn(x_v.w, grad_output_v.w, ds_alpha_n, eps);
 
-    *reinterpret_cast<vector_t *>(&dx[i]) = dx_v;
+    *reinterpret_cast<vector_t *>(&dx[base_idx]) = dx_v;
 
     thread_dalpha_p +=
         dalpha_p_v.x + dalpha_p_v.y + dalpha_p_v.z + dalpha_p_v.w;
@@ -302,86 +388,6 @@ __global__ void xielu_backward_impl(const scalar_t *__restrict__ x,
   }
 }
 
-torch::Tensor XIELUAutograd::forward(AutogradContext *ctx, Tensor x,
-                                     Tensor alpha_p, Tensor alpha_n,
-                                     double beta, double eps,
-                                     bool with_vector_loads) {
-
-  PUSH_RANGE("XIELU_FWD", 0)
-
-  TORCH_CHECK(x.is_cuda(), "Input tensor x must be on the CUDA device.");
-  TORCH_CHECK(alpha_p.is_cuda(),
-              "Input tensor alpha_p must be on the CUDA device.");
-  TORCH_CHECK(alpha_n.is_cuda(),
-              "Input tensor alpha_n must be on the CUDA device.");
-  TORCH_CHECK(alpha_p.dim() == 1 && alpha_p.numel() == 1,
-              "alpha_p must be a 1-D tensor with one element.");
-  TORCH_CHECK(alpha_n.dim() == 1 && alpha_n.numel() == 1,
-              "alpha_n must be a 1-D tensor with one element.");
-  TORCH_CHECK(x.dtype() == alpha_p.dtype(), "Data type of x (", x.dtype(),
-              ") must match data type of alpha_p (", alpha_p.dtype(), ").");
-  TORCH_CHECK(x.dtype() == alpha_n.dtype(), "Data type of x (", x.dtype(),
-              ") must match data type of alpha_n (", alpha_n.dtype(), ").");
-
-  const int batch_size = x.size(0);
-  const int seq_len = x.size(1);
-  const int hidden_dim = x.size(2);
-  const int nelements = batch_size * seq_len * hidden_dim;
-
-  TORCH_CHECK(hidden_dim % 4 == 0, "hidden_dim must be a multiple of 4");
-
-  const int blockSize = NWARPS * WARP_SIZE;
-  const int numBlocks =
-      max(1, min(getMaxBlocks(), (nelements + blockSize - 1) / blockSize));
-
-  TensorOptions options = x.options();
-  Tensor output = torch::empty_like(x);
-
-  const auto stream = c10::cuda::getCurrentCUDAStream(x.get_device());
-  const c10::cuda::CUDAStreamGuard guard(stream);
-
-  AT_DISPATCH_FLOATING_TYPES_AND2(
-      at::ScalarType::Half, at::ScalarType::BFloat16, x.scalar_type(),
-      "forward", ([&] {
-        using vector_t = typename std::conditional<
-            std::is_same<scalar_t, float>::value, float4,
-            typename std::conditional<
-                std::is_same<scalar_t, double>::value, double4,
-                typename std::conditional<
-                    std::is_same<scalar_t, c10::Half>::value, half4,
-                    typename std::conditional<
-                        std::is_same<scalar_t, c10::BFloat16>::value, bfloat4,
-                        void>::type>::type>::type>::type;
-
-        static_assert(!std::is_same<vector_t, void>::value, "Unsupported type");
-
-        if (with_vector_loads) {
-          vectorised_xielu_forward_impl<scalar_t, vector_t>
-              <<<numBlocks, blockSize, 0, stream>>>(
-                  x.data_ptr<scalar_t>(), batch_size * seq_len * hidden_dim,
-                  get_accessor<scalar_t, 1>(alpha_p),
-                  get_accessor<scalar_t, 1>(alpha_n), (scalar_t)beta,
-                  (scalar_t)eps, output.data_ptr<scalar_t>());
-        } else {
-
-          xielu_forward_impl<scalar_t><<<numBlocks, blockSize, 0, stream>>>(
-              x.data_ptr<scalar_t>(), batch_size * seq_len * hidden_dim,
-              get_accessor<scalar_t, 1>(alpha_p),
-              get_accessor<scalar_t, 1>(alpha_n), (scalar_t)beta, (scalar_t)eps,
-              output.data_ptr<scalar_t>());
-        }
-      }));
-
-  ctx->save_for_backward({x, alpha_p, alpha_n});
-  ctx->saved_data["eps"] = eps;
-  ctx->saved_data["beta"] = beta;
-  ctx->saved_data["with_vector_loads"] = with_vector_loads;
-
-  POP_RANGE
-
-  return output;
-}
-
 variable_list XIELUAutograd::backward(AutogradContext *ctx,
                                       variable_list grad_outputs) {
 
@@ -417,8 +423,11 @@ variable_list XIELUAutograd::backward(AutogradContext *ctx,
   TORCH_CHECK(hidden_dim % 4 == 0, "hidden_dim must be a multiple of 4");
 
   const int blockSize = NWARPS * WARP_SIZE;
-  const int numBlocks =
-      max(1, min(getMaxBlocks(), (nelements + blockSize - 1) / blockSize));
+  const int elements_per_thread = with_vector_loads ? 4 : 1;
+  const int adjusted_elements = nelements / elements_per_thread;
+  const int numBlocks = max(
+      1, min(getMaxBlocks(), (adjusted_elements + blockSize - 1) / blockSize));
+
   TensorOptions options = x.options();
 
   Tensor dx = torch::empty_like(x);
@@ -466,7 +475,7 @@ variable_list XIELUAutograd::backward(AutogradContext *ctx,
         if (with_vector_loads) {
           vectorised_xielu_backward_impl<scalar_t, reduction_t, vector_t>
               <<<numBlocks, blockSize, 0, stream>>>(
-                  x.data_ptr<scalar_t>(), nbatch * seq_len * hidden_dim,
+                  x.data_ptr<scalar_t>(), nelements,
                   get_accessor<scalar_t, 1>(alpha_p),
                   get_accessor<scalar_t, 1>(alpha_n),
                   grad_outputs[0].data_ptr<scalar_t>(), (scalar_t)beta,
@@ -476,7 +485,7 @@ variable_list XIELUAutograd::backward(AutogradContext *ctx,
         } else {
           xielu_backward_impl<scalar_t, reduction_t>
               <<<numBlocks, blockSize, 0, stream>>>(
-                  x.data_ptr<scalar_t>(), nbatch * seq_len * hidden_dim,
+                  x.data_ptr<scalar_t>(), nelements,
                   get_accessor<scalar_t, 1>(alpha_p),
                   get_accessor<scalar_t, 1>(alpha_n),
                   grad_outputs[0].data_ptr<scalar_t>(), (scalar_t)beta,
