@@ -11,8 +11,8 @@ using namespace torch::autograd;
 using torch::Tensor;
 
 // wrapper class which we expose to the API.
-torch::Tensor XIELU::forward(Tensor x, Tensor alpha_p, Tensor alpha_n, double beta, double eps) {
-  return XIELUAutograd::apply(x, alpha_p, alpha_n, beta, eps);
+torch::Tensor XIELU::forward(Tensor x, Tensor alpha_p, Tensor alpha_n, double beta, double eps, bool with_vector_loads) {
+  return XIELUAutograd::apply(x, alpha_p, alpha_n, beta, eps, with_vector_loads);
 }
 
 TORCH_LIBRARY(xielu, m) {
