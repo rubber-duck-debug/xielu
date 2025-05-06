@@ -15,7 +15,7 @@ class XIELU : public torch::CustomClassHolder {
 public:
   XIELU() {}
 
-  Tensor forward(Tensor x, Tensor alpha_p, Tensor alpha_n, double beta, double eps);
+  Tensor forward(Tensor x, Tensor alpha_p, Tensor alpha_n, double beta, double eps, bool with_vector_loads);
 
   std::vector<Tensor> __getstate__() { return {}; }
 
