@@ -86,7 +86,7 @@ class XIELUfn(torch.nn.Module):
 
 
 class XIELU(torch.nn.Module):
-    def __init__(self, alpha_p_init=0.8, alpha_n_init=0.8, beta=0.5, eps=1e-6, device=None, dtype=None, with_vector_loads=False):
+    def __init__(self, alpha_p_init=0.8, alpha_n_init=0.8, beta=0.5, eps=1e-6, device=None, dtype=None, with_vector_loads=True):
         super().__init__()
         self.alpha_p, self.alpha_n, self.beta, self.eps = create_xielu_params(
             alpha_p_init, alpha_n_init, beta, eps, device, dtype)
