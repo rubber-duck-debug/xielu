@@ -112,27 +112,20 @@ forward_kernel(const scalar_t *__restrict__ x, const int total_elements,
   int vectorized_elements = total_elements / 4;
   int idx = blockIdx.x * blockDim.x + threadIdx.x;
 
-  for (int i = idx * 2; i < vectorized_elements;
-       i += blockDim.x * gridDim.x * 2) {
+  for (int i = idx; i < vectorized_elements; i += blockDim.x * gridDim.x) {
     // safe: i and i+1 both < vectorized_elements
     vector_t x_v1 = reinterpret_cast<const vector_t *>(x)[i];
-    vector_t x_v2 = reinterpret_cast<const vector_t *>(x)[i + 1];
 
-    vector_t out1, out2;
+    vector_t out1;
 
     out1.x = COMPUTE(x_v1.x);
     out1.y = COMPUTE(x_v1.y);
     out1.z = COMPUTE(x_v1.z);
     out1.w = COMPUTE(x_v1.w);
 
-    out2.x = COMPUTE(x_v2.x);
-    out2.y = COMPUTE(x_v2.y);
-    out2.z = COMPUTE(x_v2.z);
-    out2.w = COMPUTE(x_v2.w);
-
     reinterpret_cast<vector_t *>(output)[i] = out1;
-    reinterpret_cast<vector_t *>(output)[i + 1] = out2;
   }
+#undef COMPUTE
 }
 
 torch::Tensor XIELUAutograd::forward(AutogradContext *ctx, Tensor x,
@@ -160,12 +153,11 @@ torch::Tensor XIELUAutograd::forward(AutogradContext *ctx, Tensor x,
   const int hidden_dim = x.size(2);
   const int nelements = batch_size * seq_len * hidden_dim;
 
-  TORCH_CHECK(hidden_dim % 8 == 0, "hidden_dim must be a multiple of 8");
+  TORCH_CHECK(hidden_dim % 4 == 0, "hidden_dim must be a multiple of 4");
 
   const int blockSize = NWARPS * WARP_SIZE;
-  const int numBlocks =
-      max(1, min(getMaxBlocks(),
-                 ((nelements / 4 / 2) + blockSize - 1) / blockSize));
+  const int numBlocks = max(
+      1, min(getMaxBlocks(), ((nelements / 4) + blockSize - 1) / blockSize));
   TensorOptions options = x.options();
   Tensor output = torch::empty_like(x);
 
