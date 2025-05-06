@@ -65,10 +65,13 @@ def format_results(results):
 
 def run_benchmarks():
     device = torch.device("cuda")
+    dtype = torch.bfloat16
     results = []
 
-    xielu_py = torch.compile(XIELUPy(0.8, 0.8, 0.5, 1e-6)).to(device)
-    xielu_cuda = torch.compile(XIELU(0.8, 0.8, 0.5, 1e-6)).to(device)
+    xielu_py = torch.compile(
+        XIELUPy(0.8, 0.8, 0.5, 1e-6, dtype=dtype)).to(device)
+    xielu_cuda = torch.compile(
+        XIELU(0.8, 0.8, 0.5, 1e-6, dtype=dtype)).to(device)
 
     for (NBATCH, NSEQ, HIDDENDIM) in INPUT_SIZES:
         print(
@@ -76,7 +79,7 @@ def run_benchmarks():
 
         # Create input tensor
         input_tensor = torch.randn(
-            NBATCH, NSEQ, HIDDENDIM, device=device, dtype=torch.float32)
+            NBATCH, NSEQ, HIDDENDIM, device=device, dtype=dtype)
 
         # Initialize models
 
