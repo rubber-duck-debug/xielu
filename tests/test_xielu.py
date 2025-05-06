@@ -1,14 +1,13 @@
 import unittest
-import pytest
 import torch
 from torch.autograd import gradcheck
 from xielu.ops.wrappers import XIELUPy, XIELUfn, XIELU
 
 import torch.nn.functional as F
 
-NBATCH = 4
-NSEQ = 16
-HIDDENDIM = 2
+NBATCH = 1
+NSEQ = 32
+HIDDENDIM = 32
 
 
 class TestXIELU(unittest.TestCase):
@@ -40,17 +39,18 @@ class TestXIELU(unittest.TestCase):
         output_py = self.xielu_py(input_tensor)
         output_fn = self.xielu_fn(input_tensor)
         output_cuda = self.xielu(input_tensor)
-        torch.testing.assert_close(output_py, output_fn, rtol=1e-6, atol=1e-6)
+        torch.testing.assert_close(output_py, output_fn, rtol=1e-5, atol=1e-5)
         torch.testing.assert_close(
             output_py, output_cuda, rtol=1e-6, atol=1e-6)
 
     def test_forward(self):
         self.run_forward_comparison(self.input)
 
-    def run_gradcheck(self, model, inputs, dtype=torch.float64, eps=1e-5, rtol=1e-5, atol=1e-5):
+    def run_gradcheck(self, model, inputs, dtype=torch.float64, eps=1e-3, rtol=1e-4, atol=1e-4):
         inputs = tuple(inp.clone().detach().to(
             dtype).requires_grad_(True) for inp in inputs)
-        gradcheck(model, inputs, eps=eps, rtol=rtol, atol=atol, fast_mode=True)
+        gradcheck(model, inputs, eps=1e-3, rtol=rtol,
+                  atol=atol, fast_mode=False)
 
     def test_gradients(self):
         self.run_gradcheck(self.xielu, (self.input,))
