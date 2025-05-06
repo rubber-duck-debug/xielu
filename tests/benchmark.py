@@ -71,9 +71,9 @@ def run_benchmarks():
     results = []
 
     xielu_py = torch.compile(
-        XIELUPy(0.8, 0.8, 0.5, 1e-6, dtype=dtype)).to(device)
+        XIELUPy(0.8, 0.8, 0.5, -1e-6, dtype=dtype)).to(device)
     xielu_cuda = torch.compile(
-        XIELU(0.8, 0.8, 0.5, 1e-6, dtype=dtype, with_vector_loads=False)).to(device)
+        XIELU(0.8, 0.8, 0.5, -1e-6, dtype=dtype, with_vector_loads=False)).to(device)
 
     for (NBATCH, NSEQ, HIDDENDIM) in INPUT_SIZES:
         print(
