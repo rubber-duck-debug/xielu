@@ -227,6 +227,20 @@ backward_kernel(const scalar_t *__restrict__ x, const int total_elements,
 
   int idx = blockIdx.x * blockDim.x + threadIdx.x;
 
+#define DX_COMPUTE(v, dout)                                                    \
+  (to_float_if_needed(v) > scalar_t(0.0)                                       \
+       ? dout * (2 * s_alpha_p * v + beta)                                     \
+       : dout * (s_alpha_n * compute_expm1<scalar_t>(min(v, eps)) + beta))
+
+#define DP_COMPUTE(v, dout)                                                    \
+  (to_float_if_needed(v) > scalar_t(0.0) ? dout * ds_alpha_p * v * v           \
+                                         : scalar_t(0.0))
+
+#define DN_COMPUTE(v, dout)                                                    \
+  (to_float_if_needed(v) <= scalar_t(0.0)                                      \
+       ? dout * ds_alpha_n * (compute_expm1<scalar_t>(min(v, eps)) - v)        \
+       : scalar_t(0.0))
+
   for (int i = idx; i < total_elements / 4; i += blockDim.x * gridDim.x) {
 
     vector_t x_v = reinterpret_cast<const vector_t *>(x)[i];
@@ -236,50 +250,20 @@ backward_kernel(const scalar_t *__restrict__ x, const int total_elements,
     vector_t dx_v;
     vector_t dalpha_p_v, dalpha_n_v;
 
-    dx_v.x =
-        x_v.x > scalar_t(0.0)
-            ? grad_output_v.x * (2 * s_alpha_p * x_v.x + beta)
-            : grad_output_v.x * (s_alpha_n * expm1(min(x_v.x, eps)) + beta);
-    dx_v.y =
-        x_v.y > scalar_t(0.0)
-            ? grad_output_v.y * (2 * s_alpha_p * x_v.y + beta)
-            : grad_output_v.y * (s_alpha_n * expm1(min(x_v.y, eps)) + beta);
+    dx_v.x = DX_COMPUTE(x_v.x, grad_output_v.x);
+    dx_v.y = DX_COMPUTE(x_v.y, grad_output_v.y);
+    dx_v.z = DX_COMPUTE(x_v.z, grad_output_v.z);
+    dx_v.w = DX_COMPUTE(x_v.w, grad_output_v.w);
 
-    dx_v.z =
-        x_v.z > scalar_t(0.0)
-            ? grad_output_v.z * (2 * s_alpha_p * x_v.z + beta)
-            : grad_output_v.z * (s_alpha_n * expm1(min(x_v.z, eps)) + beta);
+    dalpha_p_v.x = DP_COMPUTE(x_v.x, grad_output_v.x);
+    dalpha_p_v.y = DP_COMPUTE(x_v.y, grad_output_v.y);
+    dalpha_p_v.z = DP_COMPUTE(x_v.z, grad_output_v.z);
+    dalpha_p_v.w = DP_COMPUTE(x_v.w, grad_output_v.w);
 
-    dx_v.w =
-        x_v.w > scalar_t(0.0)
-            ? grad_output_v.w * (2 * s_alpha_p * x_v.w + beta)
-            : grad_output_v.w * (s_alpha_n * expm1(min(x_v.w, eps)) + beta);
-
-    dalpha_p_v.x = x_v.x > scalar_t(0.0)
-                       ? grad_output_v.x * ds_alpha_p * x_v.x * x_v.x
-                       : scalar_t(0.0);
-    dalpha_p_v.y = x_v.y > scalar_t(0.0)
-                       ? grad_output_v.y * ds_alpha_p * x_v.y * x_v.y
-                       : scalar_t(0.0);
-    dalpha_p_v.z = x_v.z > scalar_t(0.0)
-                       ? grad_output_v.z * ds_alpha_p * x_v.z * x_v.z
-                       : scalar_t(0.0);
-    dalpha_p_v.w = x_v.w > scalar_t(0.0)
-                       ? grad_output_v.w * ds_alpha_p * x_v.w * x_v.w
-                       : scalar_t(0.0);
-
-    dalpha_n_v.x = x_v.x <= scalar_t(0.0) ? grad_output_v.x * ds_alpha_n *
-                                                (expm1(min(x_v.x, eps)) - x_v.x)
-                                          : scalar_t(0.0);
-    dalpha_n_v.y = x_v.y <= scalar_t(0.0) ? grad_output_v.y * ds_alpha_n *
-                                                (expm1(min(x_v.y, eps)) - x_v.y)
-                                          : scalar_t(0.0);
-    dalpha_n_v.z = x_v.z <= scalar_t(0.0) ? grad_output_v.z * ds_alpha_n *
-                                                (expm1(min(x_v.z, eps)) - x_v.z)
-                                          : scalar_t(0.0);
-    dalpha_n_v.w = x_v.w <= scalar_t(0.0) ? grad_output_v.w * ds_alpha_n *
-                                                (expm1(min(x_v.w, eps)) - x_v.w)
-                                          : scalar_t(0.0);
+    dalpha_n_v.x = DN_COMPUTE(x_v.x, grad_output_v.x);
+    dalpha_n_v.y = DN_COMPUTE(x_v.y, grad_output_v.y);
+    dalpha_n_v.z = DN_COMPUTE(x_v.z, grad_output_v.z);
+    dalpha_n_v.w = DN_COMPUTE(x_v.w, grad_output_v.w);
 
     reinterpret_cast<vector_t *>(dx)[i] = dx_v;
 
@@ -287,17 +271,6 @@ backward_kernel(const scalar_t *__restrict__ x, const int total_elements,
         dalpha_p_v.x + dalpha_p_v.y + dalpha_p_v.z + dalpha_p_v.w;
     thread_dalpha_n +=
         dalpha_n_v.x + dalpha_n_v.y + dalpha_n_v.z + dalpha_n_v.w;
-    /*
-      if (static_cast<float>(x_e) > 0.0f) {
-        dx[idx] = grad_output * (2 * s_alpha_p * x_e + beta);
-        thread_dalpha_p += grad_output * sp::df(_alpha_p) * x_e * x_e;
-      } else {
-        dx[idx] =
-            grad_output * ((beta + s_alpha_n) * exp(min(x_e, eps)) - s_alpha_n);
-        thread_dalpha_n +=
-            grad_output * sp::df(_alpha_n) * (expm1(min(x_e, eps)) - x_e);
-      }
-      */
   }
 
   __syncthreads();
@@ -379,10 +352,11 @@ variable_list XIELUAutograd::backward(AutogradContext *ctx,
   const auto stream = c10::cuda::getCurrentCUDAStream(x.get_device());
   const c10::cuda::CUDAStreamGuard guard(stream);
 
-  // AT_DISPATCH_FLOATING_TYPES_AND2(
-  //     at::ScalarType::Half, at::ScalarType::BFloat16, x.scalar_type(),
-  AT_DISPATCH_FLOATING_TYPES(
-      x.scalar_type(), "backward", ([&] {
+  AT_DISPATCH_FLOATING_TYPES_AND2(
+      at::ScalarType::Half, at::ScalarType::BFloat16, x.scalar_type(),
+      // AT_DISPATCH_FLOATING_TYPES(
+      // x.scalar_type(),
+      "backward", ([&] {
         using vector_t = typename std::conditional<
             std::is_same<scalar_t, float>::value, float4,
             typename std::conditional<
@@ -407,8 +381,8 @@ variable_list XIELUAutograd::backward(AutogradContext *ctx,
                 get_accessor<scalar_t, 1>(alpha_n),
                 grad_outputs[0].data_ptr<scalar_t>(), (scalar_t)beta,
                 (scalar_t)eps, dx.data_ptr<scalar_t>(),
-                get_accessor<scalar_t, 1>(dalpha_p),
-                get_accessor<scalar_t, 1>(dalpha_n));
+                get_accessor<reduction_t, 1>(dalpha_p),
+                get_accessor<reduction_t, 1>(dalpha_n));
       }));
 
   // torch::Tensor dalpha_p_sum = torch::sum(dalpha_p, 0, true).to(dx.dtype());
@@ -418,5 +392,5 @@ variable_list XIELUAutograd::backward(AutogradContext *ctx,
 
   POP_RANGE
 
-  return {dx, dalpha_p, dalpha_n, undef, undef};
+  return {dx, dalpha_p.to(x.dtype()), dalpha_n.to(x.dtype()), undef, undef};
 }
