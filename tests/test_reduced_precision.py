@@ -18,7 +18,7 @@ with_vector_loads = True
 
 device = torch.device("cuda")
 ref_dtype = torch.float32
-dtype = torch.float32
+dtype = torch.bfloat16
 
 input = torch.randn(
     NBATCH,
@@ -40,6 +40,8 @@ xielu = XIELU(alpha_p_init, alpha_n_init,
 out_cuda = xielu.forward(input_reduced)
 out_py = xielu_py.forward(input)
 
+print(out_cuda)
+print(out_py)
 print("mean output error...")
 print((out_cuda - out_py).abs().mean())
 
