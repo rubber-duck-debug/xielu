@@ -3,8 +3,8 @@ import torch.utils.benchmark as benchmark
 from xielu.ops.wrappers import XIELUPy, XIELU
 from time import time
 
-WARMUP_ITERS = 50
-RESULT_ITERS = 100
+WARMUP_ITERS = 100
+RESULT_ITERS = 200
 
 dtype = torch.bfloat16
 
@@ -26,7 +26,7 @@ def benchmark_model(model, input_tensor, label):
     start = time()
     for _ in range(RESULT_ITERS):
         _ = model(input_tensor)
-    torch.cuda.synchronize()
+        torch.cuda.synchronize()
     end = time()
 
     results["forward"] = (end - start) / RESULT_ITERS
@@ -39,7 +39,7 @@ def benchmark_model(model, input_tensor, label):
     start = time()
     for _ in range(RESULT_ITERS):
         output.backward(grad_output, retain_graph=True)
-    torch.cuda.synchronize()
+        torch.cuda.synchronize()
     end = time()
 
     results["backward"] = (end - start) / RESULT_ITERS

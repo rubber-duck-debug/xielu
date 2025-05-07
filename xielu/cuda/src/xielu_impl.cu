@@ -36,7 +36,7 @@ static int getMaxBlocks() {
   CHECK_RESULT(cudaGetDevice(&device));
   CHECK_RESULT(cudaDeviceGetAttribute(&numMultiprocessors,
                                       cudaDevAttrMultiProcessorCount, device));
-  return numMultiprocessors * 4;
+  return numMultiprocessors * 8;
 }
 
 /* specialized structure for vectorised loads with half, bfloat16 types */
@@ -253,31 +253,18 @@ __device__ __forceinline__ __nv_bfloat162 approx_expm1_bf162(__nv_bfloat162 x) {
 __device__ __forceinline__ __nv_bfloat162
 compute_bf16(__nv_bfloat162 v, const __nv_bfloat162 s_alpha_p,
              const __nv_bfloat162 s_alpha_n, const __nv_bfloat162 beta,
-             const __nv_bfloat162 eps) {
+             const __nv_bfloat162 eps, const __nv_bfloat162 beta_s_alpha_n) {
   // v > 0 check per lane
   __nv_bfloat162 zero = __float2bfloat162_rn(0.0f);
   __nv_bfloat162 one = __float2bfloat162_rn(1.0f);
   __nv_bfloat162 exp_input = __hmin2(v, eps);
 
-  // expm1 approx via float promotion (per lane)
-  // float2 v_f = __bfloat1622float2(v);
-  // float2 expm1_f;
-
-  //__nv_bfloat16 eps0 = __low2bfloat16(eps);
-  //__nv_bfloat16 eps1 = __high2bfloat16(eps);
-
   __nv_bfloat162 expm1_val = approx_expm1_bf162(exp_input);
 
-  // expm1_f.x = expf(fminf(v_f.x, __bfloat162float(eps0))) - 1.0f;
-  // expm1_f.y = expf(fminf(v_f.y, __bfloat162float(eps1))) - 1.0f;
-  //__nv_bfloat162 expm1_val = __float22bfloat162_rn(expm1_f);
-
-  // if v > 0: v * (s_alpha_p * v + beta)
-  // else:     (beta + s_alpha_n) * expm1(min(v, eps)) - s_alpha_n * v
   __nv_bfloat162 pos = __hadd2(__hmul2(s_alpha_p, v), beta);
   pos = __hmul2(pos, v);
 
-  __nv_bfloat162 neg = __hmul2(__hadd2(beta, s_alpha_n), expm1_val);
+  __nv_bfloat162 neg = __hmul2(beta_s_alpha_n, expm1_val);
   neg = __hsub2(neg, __hmul2(s_alpha_n, v));
 
   __nv_bfloat162 mask = __hgt2(v, zero);
@@ -345,12 +332,27 @@ __global__ void vectorised_xielu_forward_unified2_impl(
 
   const scalar_t s_alpha_p = softplus<scalar_t>::f(alpha_p[0]);
   const scalar_t s_alpha_n = softplus<scalar_t>::f(alpha_n[0]);
+  const scalar_t beta_s_alpha_n = beta + s_alpha_n;
 
   int idx = blockIdx.x * blockDim.x + threadIdx.x;
   int stride = blockDim.x * gridDim.x;
 
-  for (int i = idx; i < total_elements / 4; i += stride) {
-    int base_idx = i * 4;
+  __nv_bfloat162 s_alpa_p_bf2;
+  __nv_bfloat162 s_alpa_n_bf2;
+  __nv_bfloat162 beta_bf2;
+  __nv_bfloat162 eps_bf2;
+  __nv_bfloat162 beta_s_alpha_n_bf2;
+
+  if constexpr (std::is_same<native_t, __nv_bfloat16>::value) {
+    s_alpa_p_bf2 = __float2bfloat162_rn(s_alpha_p);
+    s_alpa_n_bf2 = __float2bfloat162_rn(s_alpha_n);
+    beta_bf2 = __float2bfloat162_rn(beta);
+    eps_bf2 = __float2bfloat162_rn(eps);
+    beta_s_alpha_n_bf2 = __float2bfloat162_rn(beta_s_alpha_n);
+  }
+
+  for (int i = idx; i < total_elements / 8; i += stride) {
+    int base_idx = i * 8;
 
     // Load input
     vec_t x_vec;
@@ -367,16 +369,26 @@ __global__ void vectorised_xielu_forward_unified2_impl(
       __nv_bfloat162 x0 = reinterpret_cast<const __nv_bfloat162 &>(x[base_idx]);
       __nv_bfloat162 x1 =
           reinterpret_cast<const __nv_bfloat162 &>(x[base_idx + 2]);
+      __nv_bfloat162 x2 =
+          reinterpret_cast<const __nv_bfloat162 &>(x[base_idx + 4]);
+      __nv_bfloat162 x3 =
+          reinterpret_cast<const __nv_bfloat162 &>(x[base_idx + 6]);
 
-      __nv_bfloat162 o0 = compute_bf16(
-          x0, __float2bfloat162_rn(s_alpha_p), __float2bfloat162_rn(s_alpha_n),
-          __float2bfloat162_rn(beta), __float2bfloat162_rn(eps));
-      __nv_bfloat162 o1 = compute_bf16(
-          x1, __float2bfloat162_rn(s_alpha_p), __float2bfloat162_rn(s_alpha_n),
-          __float2bfloat162_rn(beta), __float2bfloat162_rn(eps));
+      __nv_bfloat162 o0 = compute_bf16(x0, s_alpa_p_bf2, s_alpa_n_bf2, beta_bf2,
+                                       eps_bf2, beta_s_alpha_n_bf2);
+      __nv_bfloat162 o1 = compute_bf16(x1, s_alpa_p_bf2, s_alpa_n_bf2, beta_bf2,
+                                       eps_bf2, beta_s_alpha_n_bf2);
+
+      __nv_bfloat162 o2 = compute_bf16(x2, s_alpa_p_bf2, s_alpa_n_bf2, beta_bf2,
+                                       eps_bf2, beta_s_alpha_n_bf2);
+
+      __nv_bfloat162 o3 = compute_bf16(x3, s_alpa_p_bf2, s_alpa_n_bf2, beta_bf2,
+                                       eps_bf2, beta_s_alpha_n_bf2);
 
       reinterpret_cast<__nv_bfloat162 &>(output[base_idx]) = o0;
       reinterpret_cast<__nv_bfloat162 &>(output[base_idx + 2]) = o1;
+      reinterpret_cast<__nv_bfloat162 &>(output[base_idx + 4]) = o2;
+      reinterpret_cast<__nv_bfloat162 &>(output[base_idx + 6]) = o3;
 
     } else {
       // Generic scalar path (float, double, half)
@@ -455,10 +467,10 @@ torch::Tensor XIELUAutograd::forward(AutogradContext *ctx, Tensor x,
   const int hidden_dim = x.size(2);
   const int nelements = batch_size * seq_len * hidden_dim;
 
-  TORCH_CHECK(hidden_dim % 4 == 0, "hidden_dim must be a multiple of 4");
+  TORCH_CHECK(hidden_dim % 8 == 0, "hidden_dim must be a multiple of 4");
 
   const int blockSize = NWARPS * WARP_SIZE;
-  const int elements_per_thread = with_vector_loads ? 4 : 1;
+  const int elements_per_thread = with_vector_loads ? 8 : 1;
   const int adjusted_elements = nelements / elements_per_thread;
   const int numBlocks = max(
       1, min(getMaxBlocks(), (adjusted_elements + blockSize - 1) / blockSize));

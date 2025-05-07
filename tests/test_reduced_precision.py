@@ -40,6 +40,8 @@ xielu = XIELU(alpha_p_init, alpha_n_init,
 out_cuda = xielu.forward(input_reduced)
 out_py = xielu_py.forward(input)
 
+print(out_cuda)
+print(out_py)
 print("mean output error...")
 print((out_cuda - out_py).abs().mean())
 
