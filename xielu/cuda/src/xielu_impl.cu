@@ -422,7 +422,7 @@ torch::Tensor XIELUAutograd::forward(AutogradContext *ctx, Tensor x,
         using Traits = VectorIO<scalar_t>;
 
         const int loads_per_thread =
-            with_vector_loads ? (Traits::packed_size == 2 ? 4 : 2) : 1;
+            with_vector_loads ? (Traits::packed_size == 2 ? 4 : 1) : 1;
 
         const int elements_per_thread =
             with_vector_loads ? loads_per_thread * Traits::packed_size : 1;
@@ -434,7 +434,7 @@ torch::Tensor XIELUAutograd::forward(AutogradContext *ctx, Tensor x,
 
         if (with_vector_loads) {
           vectorised_xielu_forward_impl<scalar_t,
-                                        Traits::packed_size == 2 ? 4 : 2>
+                                        (Traits::packed_size == 2 ? 4 : 1)>
               <<<numBlocks, blockSize, 0, stream>>>(
                   x.data_ptr<scalar_t>(), nelements,
                   get_accessor<scalar_t, 1>(alpha_p),
@@ -787,7 +787,7 @@ variable_list XIELUAutograd::backward(AutogradContext *ctx,
         using Traits = VectorIO<scalar_t>;
 
         const int loads_per_thread =
-            with_vector_loads ? (Traits::packed_size == 2 ? 4 : 2) : 1;
+            with_vector_loads ? (Traits::packed_size == 2 ? 4 : 1) : 1;
 
         const int elements_per_thread =
             with_vector_loads ? loads_per_thread * Traits::packed_size : 1;
@@ -799,7 +799,7 @@ variable_list XIELUAutograd::backward(AutogradContext *ctx,
 
         if (with_vector_loads) {
           vectorised_xielu_backward_impl<scalar_t, Traits::reduction_t,
-                                         Traits::packed_size == 2 ? 4 : 2>
+                                         (Traits::packed_size == 2 ? 4 : 1)>
               <<<numBlocks, blockSize, 0, stream>>>(
                   x.data_ptr<scalar_t>(), nelements,
                   get_accessor<scalar_t, 1>(alpha_p),
