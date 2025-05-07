@@ -76,9 +76,99 @@ template <> struct softplus<c10::BFloat16> {
   }
 };
 
+template <typename scalar_t> struct VectorIO;
+
+template <> struct VectorIO<float> {
+  using scalar_t = float;
+  using native_t = float;
+  using vec_t = float4;
+
+  __device__ static void unpack(const vec_t &v, scalar_t &x0, scalar_t &x1,
+                                scalar_t &x2, scalar_t &x3) {
+    x0 = v.x;
+    x1 = v.y;
+    x2 = v.z;
+    x3 = v.w;
+  }
+
+  __device__ static vec_t pack(scalar_t x0, scalar_t x1, scalar_t x2,
+                               scalar_t x3) {
+    return {x0, x1, x2, x3};
+  }
+};
+
+template <> struct VectorIO<double> {
+  using scalar_t = double;
+  using native_t = double;
+  using vec_t = double4;
+
+  __device__ static void unpack(const vec_t &v, scalar_t &x0, scalar_t &x1,
+                                scalar_t &x2, scalar_t &x3) {
+    x0 = v.x;
+    x1 = v.y;
+    x2 = v.z;
+    x3 = v.w;
+  }
+
+  __device__ static vec_t pack(scalar_t x0, scalar_t x1, scalar_t x2,
+                               scalar_t x3) {
+    return {x0, x1, x2, x3};
+  }
+};
+
+template <> struct VectorIO<c10::Half> {
+  using scalar_t = c10::Half;
+  using native_t = __half;
+  using vec_t = __half2;
+
+  __device__ static void unpack2(const vec_t &v, scalar_t &x0, scalar_t &x1) {
+    const native_t *ptr = reinterpret_cast<const native_t *>(&v);
+    x0 = static_cast<scalar_t>(ptr[0]);
+    x1 = static_cast<scalar_t>(ptr[1]);
+  }
+
+  __device__ static vec_t pack2(scalar_t x0, scalar_t x1) {
+    vec_t v;
+    native_t *ptr = reinterpret_cast<native_t *>(&v);
+    ptr[0] = static_cast<native_t>(x0);
+    ptr[1] = static_cast<native_t>(x1);
+    return v;
+  }
+};
+
+template <> struct VectorIO<c10::BFloat16> {
+  using scalar_t = c10::BFloat16;
+  using native_t = __nv_bfloat16;
+  using vec_t = __nv_bfloat162;
+
+  __device__ static void unpack2(const vec_t &v, scalar_t &x0, scalar_t &x1) {
+    const native_t *ptr = reinterpret_cast<const native_t *>(&v);
+    x0 = static_cast<scalar_t>(ptr[0]);
+    x1 = static_cast<scalar_t>(ptr[1]);
+  }
+
+  __device__ static vec_t pack2(scalar_t x0, scalar_t x1) {
+    vec_t v;
+    native_t *ptr = reinterpret_cast<native_t *>(&v);
+    ptr[0] = static_cast<native_t>(x0);
+    ptr[1] = static_cast<native_t>(x1);
+    return v;
+  }
+};
+
 // Generic overload: cast to float
 template <typename T> __device__ __forceinline__ float to_float_if_needed(T x) {
   return static_cast<float>(x);
+}
+
+// Overload for __half
+__device__ __forceinline__ float to_float_if_needed(__half x) {
+  return __half2float(x);
+}
+
+// Overload for __nv_bfloat16
+__device__ __forceinline__ float to_float_if_needed(__nv_bfloat16 x) {
+  return __bfloat162float(x);
 }
 
 // Overload for float: return as-is
@@ -94,11 +184,9 @@ __device__ __forceinline__ scalar_t compute_expm1(const scalar_t x) {
 }
 
 template <typename scalar_t>
-__device__ __forceinline__ scalar_t compute(scalar_t v,
-                                            const scalar_t s_alpha_p,
-                                            const scalar_t s_alpha_n,
-                                            const scalar_t beta,
-                                            const scalar_t eps) {
+__device__ scalar_t compute(scalar_t v, const scalar_t s_alpha_p,
+                            const scalar_t s_alpha_n, const scalar_t beta,
+                            const scalar_t eps) {
 
   return to_float_if_needed(v) > scalar_t(0.0)
              ? v * (s_alpha_p * v + beta)
@@ -129,6 +217,197 @@ __global__ void vectorised_xielu_forward_impl(
     out.w = compute(x_v.w, s_alpha_p, s_alpha_n, beta, eps);
 
     *reinterpret_cast<vector_t *>(&output[base_idx]) = out;
+  }
+}
+
+__device__ __forceinline__ __nv_bfloat162 bf16_select(__nv_bfloat162 cond,
+                                                      __nv_bfloat162 a,
+                                                      __nv_bfloat162 b) {
+  // cond assumed to be 0xFFFF or 0x0000 per lane (i.e., true or false)
+  __nv_bfloat16 cond0 = __low2bfloat16(cond);
+  __nv_bfloat16 cond1 = __high2bfloat16(cond);
+  __nv_bfloat16 a0 = __low2bfloat16(a);
+  __nv_bfloat16 a1 = __high2bfloat16(a);
+  __nv_bfloat16 b0 = __low2bfloat16(b);
+  __nv_bfloat16 b1 = __high2bfloat16(b);
+
+  __nv_bfloat16 out0 = cond0 != __float2bfloat16_rn(0.0f) ? a0 : b0;
+  __nv_bfloat16 out1 = cond1 != __float2bfloat16_rn(0.0f) ? a1 : b1;
+
+  return __halves2bfloat162(out0, out1);
+}
+
+__device__ __forceinline__ __nv_bfloat162 approx_expm1_bf162(__nv_bfloat162 x) {
+  __nv_bfloat162 one_sixth = __float2bfloat162_rn(1.0f / 6.0f);
+  __nv_bfloat162 one_half = __float2bfloat162_rn(0.5f);
+
+  __nv_bfloat162 x2 = __hmul2(x, x);  // x^2
+  __nv_bfloat162 x3 = __hmul2(x2, x); // x^3
+
+  __nv_bfloat162 term2 = __hmul2(one_half, x2);  // x^2 / 2
+  __nv_bfloat162 term3 = __hmul2(one_sixth, x3); // x^3 / 6
+
+  return __hadd2(__hadd2(x, term2), term3); // x + x^2/2 + x^3/6
+}
+
+__device__ __forceinline__ __nv_bfloat162
+compute_bf16(__nv_bfloat162 v, const __nv_bfloat162 s_alpha_p,
+             const __nv_bfloat162 s_alpha_n, const __nv_bfloat162 beta,
+             const __nv_bfloat162 eps) {
+  // v > 0 check per lane
+  __nv_bfloat162 zero = __float2bfloat162_rn(0.0f);
+  __nv_bfloat162 one = __float2bfloat162_rn(1.0f);
+  __nv_bfloat162 exp_input = __hmin2(v, eps);
+
+  // expm1 approx via float promotion (per lane)
+  // float2 v_f = __bfloat1622float2(v);
+  // float2 expm1_f;
+
+  //__nv_bfloat16 eps0 = __low2bfloat16(eps);
+  //__nv_bfloat16 eps1 = __high2bfloat16(eps);
+
+  __nv_bfloat162 expm1_val = approx_expm1_bf162(exp_input);
+
+  // expm1_f.x = expf(fminf(v_f.x, __bfloat162float(eps0))) - 1.0f;
+  // expm1_f.y = expf(fminf(v_f.y, __bfloat162float(eps1))) - 1.0f;
+  //__nv_bfloat162 expm1_val = __float22bfloat162_rn(expm1_f);
+
+  // if v > 0: v * (s_alpha_p * v + beta)
+  // else:     (beta + s_alpha_n) * expm1(min(v, eps)) - s_alpha_n * v
+  __nv_bfloat162 pos = __hadd2(__hmul2(s_alpha_p, v), beta);
+  pos = __hmul2(pos, v);
+
+  __nv_bfloat162 neg = __hmul2(__hadd2(beta, s_alpha_n), expm1_val);
+  neg = __hsub2(neg, __hmul2(s_alpha_n, v));
+
+  __nv_bfloat162 mask = __hgt2(v, zero);
+  return bf16_select(mask, pos, neg);
+}
+
+template <typename scalar_t>
+__global__ void vectorised_xielu_forward_unified_impl(
+    const scalar_t *__restrict__ x, int total_elements,
+    const Accessor<scalar_t, 1> alpha_p, const Accessor<scalar_t, 1> alpha_n,
+    scalar_t beta, scalar_t eps, scalar_t *__restrict__ output) {
+
+  using Traits = VectorIO<scalar_t>;
+  using vec_t = typename Traits::vec_t;
+
+  const scalar_t s_alpha_p = softplus<scalar_t>::f(alpha_p[0]);
+  const scalar_t s_alpha_n = softplus<scalar_t>::f(alpha_n[0]);
+
+  int idx = blockIdx.x * blockDim.x + threadIdx.x;
+  int stride = blockDim.x * gridDim.x;
+
+  for (int i = idx; i < total_elements / 4; i += stride) {
+    int base_idx = i * 4;
+
+    scalar_t in0, in1, in2, in3;
+
+    if constexpr (std::is_same<vec_t, float4>::value ||
+                  std::is_same<vec_t, double4>::value) {
+      vec_t x_vec = *reinterpret_cast<const vec_t *>(&x[base_idx]);
+      Traits::unpack(x_vec, in0, in1, in2, in3);
+    } else {
+      vec_t x_v0 = *reinterpret_cast<const vec_t *>(&x[base_idx]);
+      vec_t x_v1 = *reinterpret_cast<const vec_t *>(&x[base_idx + 2]);
+      Traits::unpack2(x_v0, in0, in1);
+      Traits::unpack2(x_v1, in2, in3);
+    }
+
+    scalar_t out0 = compute(in0, s_alpha_p, s_alpha_n, beta, eps);
+    scalar_t out1 = compute(in1, s_alpha_p, s_alpha_n, beta, eps);
+    scalar_t out2 = compute(in2, s_alpha_p, s_alpha_n, beta, eps);
+    scalar_t out3 = compute(in3, s_alpha_p, s_alpha_n, beta, eps);
+
+    if constexpr (std::is_same<vec_t, float4>::value ||
+                  std::is_same<vec_t, double4>::value) {
+      vec_t out_vec = Traits::pack(out0, out1, out2, out3);
+      *reinterpret_cast<vec_t *>(&output[base_idx]) = out_vec;
+    } else {
+      vec_t o0 = Traits::pack2(out0, out1);
+      vec_t o1 = Traits::pack2(out2, out3);
+      *reinterpret_cast<vec_t *>(&output[base_idx]) = o0;
+      *reinterpret_cast<vec_t *>(&output[base_idx + 2]) = o1;
+    }
+  }
+}
+
+template <typename scalar_t>
+__global__ void vectorised_xielu_forward_unified2_impl(
+    const scalar_t *__restrict__ x, int total_elements,
+    const Accessor<scalar_t, 1> alpha_p, const Accessor<scalar_t, 1> alpha_n,
+    scalar_t beta, scalar_t eps, scalar_t *__restrict__ output) {
+
+  using Traits = VectorIO<scalar_t>;
+  using vec_t = typename Traits::vec_t;
+  using native_t = typename Traits::native_t;
+
+  const scalar_t s_alpha_p = softplus<scalar_t>::f(alpha_p[0]);
+  const scalar_t s_alpha_n = softplus<scalar_t>::f(alpha_n[0]);
+
+  int idx = blockIdx.x * blockDim.x + threadIdx.x;
+  int stride = blockDim.x * gridDim.x;
+
+  for (int i = idx; i < total_elements / 4; i += stride) {
+    int base_idx = i * 4;
+
+    // Load input
+    vec_t x_vec;
+    if constexpr (std::is_same<vec_t, float4>::value ||
+                  std::is_same<vec_t, double4>::value) {
+      x_vec = *reinterpret_cast<const vec_t *>(&x[base_idx]);
+    } else {
+      // bfloat16 or half: use pair loads
+      x_vec = {}; // zero-init
+    }
+
+    if constexpr (std::is_same<native_t, __nv_bfloat16>::value) {
+      // bfloat16 specialized handling
+      __nv_bfloat162 x0 = reinterpret_cast<const __nv_bfloat162 &>(x[base_idx]);
+      __nv_bfloat162 x1 =
+          reinterpret_cast<const __nv_bfloat162 &>(x[base_idx + 2]);
+
+      __nv_bfloat162 o0 = compute_bf16(
+          x0, __float2bfloat162_rn(s_alpha_p), __float2bfloat162_rn(s_alpha_n),
+          __float2bfloat162_rn(beta), __float2bfloat162_rn(eps));
+      __nv_bfloat162 o1 = compute_bf16(
+          x1, __float2bfloat162_rn(s_alpha_p), __float2bfloat162_rn(s_alpha_n),
+          __float2bfloat162_rn(beta), __float2bfloat162_rn(eps));
+
+      reinterpret_cast<__nv_bfloat162 &>(output[base_idx]) = o0;
+      reinterpret_cast<__nv_bfloat162 &>(output[base_idx + 2]) = o1;
+
+    } else {
+      // Generic scalar path (float, double, half)
+      scalar_t in0, in1, in2, in3;
+
+      if constexpr (std::is_same<vec_t, float4>::value ||
+                    std::is_same<vec_t, double4>::value) {
+        Traits::unpack(x_vec, in0, in1, in2, in3);
+      } else {
+        vec_t x_v0 = *reinterpret_cast<const vec_t *>(&x[base_idx]);
+        vec_t x_v1 = *reinterpret_cast<const vec_t *>(&x[base_idx + 2]);
+        Traits::unpack2(x_v0, in0, in1);
+        Traits::unpack2(x_v1, in2, in3);
+      }
+
+      scalar_t out0 = compute(in0, s_alpha_p, s_alpha_n, beta, eps);
+      scalar_t out1 = compute(in1, s_alpha_p, s_alpha_n, beta, eps);
+      scalar_t out2 = compute(in2, s_alpha_p, s_alpha_n, beta, eps);
+      scalar_t out3 = compute(in3, s_alpha_p, s_alpha_n, beta, eps);
+
+      if constexpr (std::is_same<vec_t, float4>::value ||
+                    std::is_same<vec_t, double4>::value) {
+        vec_t out_vec = Traits::pack(out0, out1, out2, out3);
+        *reinterpret_cast<vec_t *>(&output[base_idx]) = out_vec;
+      } else {
+        vec_t o0 = Traits::pack2(out0, out1);
+        vec_t o1 = Traits::pack2(out2, out3);
+        *reinterpret_cast<vec_t *>(&output[base_idx]) = o0;
+        *reinterpret_cast<vec_t *>(&output[base_idx + 2]) = o1;
+      }
+    }
   }
 }
 
@@ -193,7 +472,7 @@ torch::Tensor XIELUAutograd::forward(AutogradContext *ctx, Tensor x,
   AT_DISPATCH_FLOATING_TYPES_AND2(
       at::ScalarType::Half, at::ScalarType::BFloat16, x.scalar_type(),
       "forward", ([&] {
-        using vector_t = typename std::conditional<
+        /*using vector_t = typename std::conditional<
             std::is_same<scalar_t, float>::value, float4,
             typename std::conditional<
                 std::is_same<scalar_t, double>::value, double4,
@@ -201,12 +480,22 @@ torch::Tensor XIELUAutograd::forward(AutogradContext *ctx, Tensor x,
                     std::is_same<scalar_t, c10::Half>::value, half4,
                     typename std::conditional<
                         std::is_same<scalar_t, c10::BFloat16>::value, bfloat4,
-                        void>::type>::type>::type>::type;
+                        void>::type>::type>::type>::type; */
+
+        using vector_t = typename std::conditional<
+            std::is_same<scalar_t, float>::value, float4,
+            typename std::conditional<
+                std::is_same<scalar_t, double>::value, double4,
+                typename std::conditional<
+                    std::is_same<scalar_t, c10::Half>::value, __half2,
+                    typename std::conditional<
+                        std::is_same<scalar_t, c10::BFloat16>::value,
+                        __nv_bfloat162, void>::type>::type>::type>::type;
 
         static_assert(!std::is_same<vector_t, void>::value, "Unsupported type");
 
         if (with_vector_loads) {
-          vectorised_xielu_forward_impl<scalar_t, vector_t>
+          vectorised_xielu_forward_unified2_impl<scalar_t>
               <<<numBlocks, blockSize, 0, stream>>>(
                   x.data_ptr<scalar_t>(), nelements,
                   get_accessor<scalar_t, 1>(alpha_p),
@@ -332,7 +621,99 @@ __global__ void vectorised_xielu_backward_impl(
     gpuAtomicAdd(&dalpha_n[0], thread_dalpha_n);
   }
 }
+/*
+template <typename scalar_t, typename reduction_type>
+__global__ void vectorised_xielu_backward_impl2(
+    const scalar_t *__restrict__ x, const int total_elements,
+    const Accessor<scalar_t, 1> alpha_p, const Accessor<scalar_t, 1> alpha_n,
+    const scalar_t *__restrict__ grad_outputs, const scalar_t beta,
+    const scalar_t eps, scalar_t *__restrict__ dx,
+    Accessor<reduction_type, 1> dalpha_p,
+    Accessor<reduction_type, 1> dalpha_n) {
 
+  using Traits = VectorIO<scalar_t>;
+  using vec_t = typename Traits::vec_t;
+
+  using sp = softplus<scalar_t>;
+  const scalar_t _alpha_p = alpha_p[0];
+  const scalar_t _alpha_n = alpha_n[0];
+
+  const scalar_t s_alpha_p = sp::f(_alpha_p);
+  const scalar_t s_alpha_n = beta + sp::f(_alpha_n);
+  const scalar_t ds_alpha_p = sp::df(_alpha_p);
+  const scalar_t ds_alpha_n = sp::df(_alpha_n);
+
+  reduction_type thread_dalpha_p = reduction_type(0.0);
+  reduction_type thread_dalpha_n = reduction_type(0.0);
+
+  int idx = blockIdx.x * blockDim.x + threadIdx.x;
+  int stride = blockDim.x * gridDim.x;
+
+  for (int i = idx; i < total_elements / 4; i += stride) {
+    int base_idx = i * 4;
+
+    scalar_t in0, in1, in2, in3;
+
+    if constexpr (std::is_same<vec_t, float4>::value ||
+                  std::is_same<vec_t, double4>::value) {
+      vec_t x_vec = *reinterpret_cast<const vec_t *>(&x[base_idx]);
+      Traits::unpack(x_vec, in0, in1, in2, in3);
+    } else {
+      vec_t x_v0 = *reinterpret_cast<const vec_t *>(&x[base_idx]);
+      vec_t x_v1 = *reinterpret_cast<const vec_t *>(&x[base_idx + 2]);
+      Traits::unpack2(x_v0, in0, in1);
+      Traits::unpack2(x_v1, in2, in3);
+    }
+
+    vector_t x_v = *reinterpret_cast<const vector_t *>(&x[base_idx]);
+
+    vector_t grad_output_v =
+        *reinterpret_cast<const vector_t *>(&grad_outputs[base_idx]);
+    vector_t dx_v;
+    vector_t dalpha_p_v, dalpha_n_v;
+
+    dx_v.x =
+        compute_dx(x_v.x, grad_output_v.x, s_alpha_p, s_alpha_n, beta, eps);
+    dx_v.y =
+        compute_dx(x_v.y, grad_output_v.y, s_alpha_p, s_alpha_n, beta, eps);
+    dx_v.z =
+        compute_dx(x_v.z, grad_output_v.z, s_alpha_p, s_alpha_n, beta, eps);
+    dx_v.w =
+        compute_dx(x_v.w, grad_output_v.w, s_alpha_p, s_alpha_n, beta, eps);
+
+    dalpha_p_v.x = compute_dp(x_v.x, grad_output_v.x, ds_alpha_p);
+    dalpha_p_v.y = compute_dp(x_v.y, grad_output_v.y, ds_alpha_p);
+    dalpha_p_v.z = compute_dp(x_v.z, grad_output_v.z, ds_alpha_p);
+    dalpha_p_v.w = compute_dp(x_v.w, grad_output_v.w, ds_alpha_p);
+
+    dalpha_n_v.x = compute_dn(x_v.x, grad_output_v.x, ds_alpha_n, eps);
+    dalpha_n_v.y = compute_dn(x_v.y, grad_output_v.y, ds_alpha_n, eps);
+    dalpha_n_v.z = compute_dn(x_v.z, grad_output_v.z, ds_alpha_n, eps);
+    dalpha_n_v.w = compute_dn(x_v.w, grad_output_v.w, ds_alpha_n, eps);
+
+    *reinterpret_cast<vector_t *>(&dx[base_idx]) = dx_v;
+
+    thread_dalpha_p +=
+        dalpha_p_v.x + dalpha_p_v.y + dalpha_p_v.z + dalpha_p_v.w;
+    thread_dalpha_n +=
+        dalpha_n_v.x + dalpha_n_v.y + dalpha_n_v.z + dalpha_n_v.w;
+  }
+
+  __syncthreads();
+
+  // reduce thread-local contributions into thread % 32 = 0
+  for (int offset = WARP_SIZE / 2; offset > 0; offset /= 2) {
+    thread_dalpha_p += __shfl_down_sync(0xffffffff, thread_dalpha_p, offset);
+    thread_dalpha_n += __shfl_down_sync(0xffffffff, thread_dalpha_n, offset);
+  }
+
+  // write each warp's contributions to grad to gmem
+  if (threadIdx.x % WARP_SIZE == 0) {
+    gpuAtomicAdd(&dalpha_p[0], thread_dalpha_p);
+    gpuAtomicAdd(&dalpha_n[0], thread_dalpha_n);
+  }
+}
+ */
 template <typename scalar_t, typename reduction_type>
 __global__ void xielu_backward_impl(const scalar_t *__restrict__ x,
                                     const int total_elements,

@@ -18,7 +18,7 @@ with_vector_loads = True
 
 device = torch.device("cuda")
 ref_dtype = torch.float32
-dtype = torch.float32
+dtype = torch.bfloat16
 
 input = torch.randn(
     NBATCH,

@@ -6,13 +6,12 @@ from time import time
 WARMUP_ITERS = 50
 RESULT_ITERS = 100
 
-dtype = torch.float32
+dtype = torch.bfloat16
 
 INPUT_SIZES = [
     (1, 4096, 8192),
     (2, 2048, 8192),
-    (4, 2048, 8192),
-    (6, 2048, 8192),
+    (5, 4096, 8192),
 ]
 
 
