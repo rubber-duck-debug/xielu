@@ -511,16 +511,6 @@ __device__ __forceinline__ scalar_t compute_dn(scalar_t v, scalar_t dout,
              : scalar_t(0.0);
 }
 
-__device__ __forceinline__ float float16_sum(__nv_bfloat162 val) {
-  float2 v = __bfloat1622float2(val);
-  return v.x + v.y;
-}
-
-__device__ __forceinline__ float float16_sum(__half2 val) {
-  float2 v = __half22float2(val);
-  return v.x + v.y;
-}
-
 template <typename T>
 __device__ __forceinline__ T compute_dn_f16(T v, T dout, T ds_alpha_n, T eps) {
   T zero = zero2(v);
@@ -532,6 +522,16 @@ __device__ __forceinline__ T compute_dn_f16(T v, T dout, T ds_alpha_n, T eps) {
   T mask = __hle2(v, zero);
 
   return select2(mask, term, zero);
+}
+
+__device__ __forceinline__ float float16_sum(__nv_bfloat162 val) {
+  float2 v = __bfloat1622float2(val);
+  return v.x + v.y;
+}
+
+__device__ __forceinline__ float float16_sum(__half2 val) {
+  float2 v = __half22float2(val);
+  return v.x + v.y;
 }
 
 template <typename scalar_t, typename reduction_type,
@@ -762,9 +762,7 @@ variable_list XIELUAutograd::backward(AutogradContext *ctx,
   TensorOptions options = x.options();
 
   Tensor dx = torch::empty_like(x);
-  // each block stores a contribution to dalpha_p, dalpha_n
-  // do reductions to dalpha_p, dalpha_n in higher precision to avoid
-  // numerical errors
+
   Tensor dalpha_p;
   Tensor dalpha_n;
 
