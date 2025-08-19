@@ -1,10 +1,10 @@
 # XIELU
 
-XIELU is a high-performance CUDA implementation of a parameterized activation function designed for deep learning applications. This library provides optimized GPU kernels with PyTorch integration for both training and inference.
+XIELU (https://arxiv.org/abs/2411.13010) is a high-performance CUDA implementation of a parameterized activation function designed for deep learning applications. This library provides optimized GPU kernels with PyTorch integration for both training and inference.
 
 ## Mathematical Definition
 
-The XIELU activation function (https://arxiv.org/abs/2411.13010) is defined as:
+The XIELU activation function is defined as:
 
 ```
 f(x) = {
