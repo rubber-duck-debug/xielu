@@ -43,6 +43,7 @@ XIELU implements a custom activation function with learnable parameters `alpha_p
 XIELU provides three implementation variants for different use cases:
 
 - **`XIELU`**: CUDA-accelerated implementation (recommended for production)
+- **`XIELUCpp`**: CUDA-accelerated implementation, but wrapped in pytorch Autograd function. (recommended for production)
 - **`XIELUfn`**: Pure PyTorch with custom autograd function
 - **`XIELUPy`**: Pure PyTorch implementation (reference implementation)
 
@@ -139,7 +140,6 @@ The project uses CMake for building the CUDA extensions:
 ```bash
 # Clean build
 rm -rf build/
-python setup.py clean --all
 
 # Build in development mode
 pip install -e . --no-build-isolation --no-deps
@@ -148,27 +148,12 @@ pip install -e . --no-build-isolation --no-deps
 CMAKE_VERBOSE_MAKEFILE=1 pip install -e . --no-build-isolation --no-deps
 ```
 
-## Performance
-
-### Hardware Requirements
-
-- **NVIDIA GPU**: Compute capability 6.0 or higher
-- **Memory**: Sufficient GPU memory for your tensor sizes
-- **CUDA**: Compatible CUDA toolkit installation
-
 ### Optimization Features
 
 - **Vectorized Memory Access**: Enable `with_vector_loads=True` for improved memory throughput
 - **Reduced Precision**: Support for bfloat16 operations for faster inference
 - **Fused Operations**: Custom CUDA kernels minimize memory bandwidth requirements
 - **Gradient Optimization**: Efficient backward pass implementation
-
-### Performance Tips
-
-1. **Batch Processing**: Larger batch sizes typically achieve better GPU utilization
-2. **Memory Layout**: Ensure tensors are contiguous in memory for optimal performance  
-3. **Precision**: Consider using bfloat16 for inference workloads when memory bandwidth is limiting
-4. **Hardware**: Performance scales with GPU memory bandwidth and compute capability
 
 ## Mathematical Definition
 
@@ -186,14 +171,3 @@ Where:
 - `α_n = β + softplus(alpha_n)`: Learned negative slope parameter  
 - `β`: Fixed scaling factor
 - `ε`: Numerical stability parameter
-
-## License
-
-This project is developed by CSCS (Swiss National Supercomputing Centre).
-
-## Contributing
-
-1. Fork the repository
-2. Create a feature branch
-3. Run the test suite to ensure correctness
-4. Submit a pull request with a clear description of changes
