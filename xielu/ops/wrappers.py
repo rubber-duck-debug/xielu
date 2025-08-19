@@ -98,3 +98,52 @@ class XIELU(torch.nn.Module):
 
     def forward_inference(self, x: torch.Tensor, a_p, a_n) -> torch.Tensor:
         return self.cuda_obj.forward(x, a_p, a_n, self.beta, self.eps, self.with_vector_loads)
+
+
+class XIELUCpp(torch.nn.Module):
+    """XIELU implementation using C++ forward_impl and backward_impl functions"""
+
+    class XIELUCppFunction(torch.autograd.Function):
+        @staticmethod
+        def forward(ctx, x, alpha_p, alpha_n, beta, eps, with_vector_loads):
+            # Save tensors for backward pass
+            ctx.save_for_backward(x, alpha_p, alpha_n)
+            ctx.beta = beta
+            ctx.eps = eps
+            ctx.with_vector_loads = with_vector_loads
+
+            # Call C++ forward implementation
+            return torch.ops.xielu.forward_impl(x, alpha_p, alpha_n, beta, eps, with_vector_loads)
+
+        @staticmethod
+        def backward(ctx, grad_output):
+            # Retrieve saved tensors and constants
+            x, alpha_p, alpha_n = ctx.saved_tensors
+            beta = ctx.beta
+            eps = ctx.eps
+            with_vector_loads = ctx.with_vector_loads
+
+            # Call C++ backward implementation
+            gradients = torch.ops.xielu.backward_impl(
+                x, alpha_p, alpha_n, eps, beta, with_vector_loads, grad_output
+            )
+
+            # Return gradients in the same order as forward inputs
+            # [grad_x, grad_alpha_p, grad_alpha_n, grad_beta, grad_eps, grad_with_vector_loads]
+            return gradients[0], gradients[1], gradients[2], None, None, None
+
+    def __init__(self, alpha_p_init=0.8, alpha_n_init=0.8, beta=0.5, eps=-1e-6, device=None, dtype=None, with_vector_loads=True):
+        super().__init__()
+        self.alpha_p, self.alpha_n, self.beta, self.eps = create_xielu_params(
+            alpha_p_init, alpha_n_init, beta, eps, device, dtype)
+        self.with_vector_loads = with_vector_loads
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.XIELUCppFunction.apply(
+            x, self.alpha_p, self.alpha_n, self.beta, self.eps, self.with_vector_loads
+        )
+
+    def forward_inference(self, x: torch.Tensor, a_p, a_n) -> torch.Tensor:
+        return self.XIELUCppFunction.apply(
+            x, a_p, a_n, self.beta, self.eps, self.with_vector_loads
+        )

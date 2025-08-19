@@ -52,7 +52,17 @@ target_include_directories(xielu PRIVATE
     ${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES}
 )
 
-target_link_libraries(xielu PRIVATE "${TORCH_LIBRARIES}")
+find_package(CUDAToolkit REQUIRED)
+
+target_link_libraries(xielu PRIVATE 
+    "${TORCH_LIBRARIES}" 
+    CUDA::cudart
+)
+
+# Link cudadevrt if available (needed for device code)
+if(TARGET CUDA::cudadevrt)
+    target_link_libraries(xielu PRIVATE CUDA::cudadevrt)
+endif()
 
 target_compile_features(xielu PRIVATE cxx_std_17)
 

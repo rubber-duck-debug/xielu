@@ -87,7 +87,9 @@ class cmake_ext(build_ext):
 
 if __name__ == "__main__":
     setup(
-        # version=__version__,
+        name="xielu",
+        version="0.1",
+        description="CUDA implementation of XIELU",
         ext_modules=[
             Extension(name="xielu", sources=[]),
         ],

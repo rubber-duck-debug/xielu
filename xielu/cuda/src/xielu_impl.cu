@@ -40,7 +40,9 @@ static int getMaxBlocks() {
 }
 
 /* specialized structure for vectorised loads with half, bfloat16 types */
-template <typename T> struct vec4 { T x, y, z, w; };
+template <typename T> struct vec4 {
+  T x, y, z, w;
+};
 
 using half4 = vec4<c10::Half>;
 using bfloat4 = vec4<c10::BFloat16>;
@@ -377,13 +379,10 @@ xielu_forward_impl(const scalar_t *__restrict__ x, const int total_elements,
   }
 }
 
-torch::Tensor XIELUAutograd::forward(AutogradContext *ctx, Tensor x,
-                                     Tensor alpha_p, Tensor alpha_n,
-                                     double beta, double eps,
-                                     bool with_vector_loads) {
+torch::Tensor forward_impl(Tensor &x, Tensor &alpha_p, Tensor &alpha_n,
+                           double beta, double eps, bool with_vector_loads) {
 
   PUSH_RANGE("XIELU_FWD", 0)
-
   TORCH_CHECK(x.is_cuda(), "Input tensor x must be on the CUDA device.");
   TORCH_CHECK(alpha_p.is_cuda(),
               "Input tensor alpha_p must be on the CUDA device.");
@@ -450,12 +449,22 @@ torch::Tensor XIELUAutograd::forward(AutogradContext *ctx, Tensor x,
         }
       }));
 
+  POP_RANGE
+
+  return output;
+}
+
+torch::Tensor XIELUAutograd::forward(AutogradContext *ctx, Tensor &x,
+                                     Tensor &alpha_p, Tensor &alpha_n,
+                                     double beta, double eps,
+                                     bool with_vector_loads) {
+  torch::Tensor output =
+      forward_impl(x, alpha_p, alpha_n, beta, eps, with_vector_loads);
+
   ctx->save_for_backward({x, alpha_p, alpha_n});
   ctx->saved_data["eps"] = eps;
   ctx->saved_data["beta"] = beta;
   ctx->saved_data["with_vector_loads"] = with_vector_loads;
-
-  POP_RANGE
 
   return output;
 }
@@ -723,18 +732,13 @@ __global__ void xielu_backward_impl(const scalar_t *__restrict__ x,
   }
 }
 
-variable_list XIELUAutograd::backward(AutogradContext *ctx,
-                                      variable_list grad_outputs) {
+std::vector<torch::Tensor> backward_impl(Tensor &x, Tensor &alpha_p,
+                                         Tensor &alpha_n, const double eps,
+                                         const double beta,
+                                         const bool with_vector_loads,
+                                         Tensor &grad_outputs) {
 
   PUSH_RANGE("XIELU_BWD", 1)
-
-  auto saved = ctx->get_saved_variables();
-  Tensor x = saved[0];
-  Tensor alpha_p = saved[1];
-  Tensor alpha_n = saved[2];
-  const double eps = ctx->saved_data["eps"].toDouble();
-  const double beta = ctx->saved_data["beta"].toDouble();
-  const bool with_vector_loads = ctx->saved_data["with_vector_loads"].toBool();
 
   TORCH_CHECK(x.is_cuda(), "Input tensor x must be on the CUDA device.");
   TORCH_CHECK(alpha_p.is_cuda(),
@@ -775,8 +779,8 @@ variable_list XIELUAutograd::backward(AutogradContext *ctx,
     dalpha_n = torch::zeros({1}, options);
   }
 
-  if (!grad_outputs[0].is_contiguous())
-    grad_outputs[0] = grad_outputs[0].contiguous();
+  if (!grad_outputs.is_contiguous())
+    grad_outputs = grad_outputs.contiguous();
 
   const auto stream = c10::cuda::getCurrentCUDAStream(x.get_device());
   const c10::cuda::CUDAStreamGuard guard(stream);
@@ -804,7 +808,7 @@ variable_list XIELUAutograd::backward(AutogradContext *ctx,
                   x.data_ptr<scalar_t>(), nelements,
                   get_accessor<scalar_t, 1>(alpha_p),
                   get_accessor<scalar_t, 1>(alpha_n),
-                  grad_outputs[0].data_ptr<scalar_t>(), (scalar_t)beta,
+                  grad_outputs.data_ptr<scalar_t>(), (scalar_t)beta,
                   (scalar_t)eps, dx.data_ptr<scalar_t>(),
                   get_accessor<Traits::reduction_t, 1>(dalpha_p),
                   get_accessor<Traits::reduction_t, 1>(dalpha_n));
@@ -814,17 +818,34 @@ variable_list XIELUAutograd::backward(AutogradContext *ctx,
                   x.data_ptr<scalar_t>(), nelements,
                   get_accessor<scalar_t, 1>(alpha_p),
                   get_accessor<scalar_t, 1>(alpha_n),
-                  grad_outputs[0].data_ptr<scalar_t>(), (scalar_t)beta,
+                  grad_outputs.data_ptr<scalar_t>(), (scalar_t)beta,
                   (scalar_t)eps, dx.data_ptr<scalar_t>(),
                   get_accessor<Traits::reduction_t, 1>(dalpha_p),
                   get_accessor<Traits::reduction_t, 1>(dalpha_n));
         }
       }));
 
-  torch::Tensor undef;
+  torch::Tensor undef = torch::Tensor();
 
   POP_RANGE
 
   return {dx,   dalpha_p.to(x.dtype()), dalpha_n.to(x.dtype()), undef, undef,
           undef};
+}
+
+variable_list XIELUAutograd::backward(AutogradContext *ctx,
+                                      variable_list grad_outputs) {
+
+  PUSH_RANGE("XIELU_BWD", 1)
+
+  auto saved = ctx->get_saved_variables();
+  Tensor x = saved[0];
+  Tensor alpha_p = saved[1];
+  Tensor alpha_n = saved[2];
+  const double eps = ctx->saved_data["eps"].toDouble();
+  const double beta = ctx->saved_data["beta"].toDouble();
+  const bool with_vector_loads = ctx->saved_data["with_vector_loads"].toBool();
+
+  return backward_impl(x, alpha_p, alpha_n, eps, beta, with_vector_loads,
+                       grad_outputs[0]);
 }
