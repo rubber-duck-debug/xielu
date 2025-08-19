@@ -2,6 +2,23 @@
 
 XIELU is a high-performance CUDA implementation of a parameterized activation function designed for deep learning applications. This library provides optimized GPU kernels with PyTorch integration for both training and inference.
 
+## Mathematical Definition
+
+The XIELU activation function is defined as:
+
+```
+f(x) = {
+  α_p * x² + β * x,                                    if x > 0
+  α_n * (exp(min(x, ε)) - 1) - α_n * x + β * x,       if x ≤ 0
+}
+```
+
+Where:
+- `α_p = softplus(alpha_p)`: Learned positive slope parameter
+- `α_n = β + softplus(alpha_n)`: Learned negative slope parameter  
+- `β`: Fixed scaling factor
+- `ε`: Numerical stability parameter
+
 ## Overview
 
 XIELU implements a custom activation function with learnable parameters `alpha_p` (positive slope), `alpha_n` (negative slope), `beta` (scaling factor), and `eps` (epsilon for numerical stability). The activation function is designed to be differentiable and suitable for gradient-based optimization.
@@ -178,20 +195,3 @@ CMAKE_VERBOSE_MAKEFILE=1 pip install -e . --no-build-isolation --no-deps
 - **Reduced Precision**: Support for bfloat16 operations for faster inference
 - **Fused Operations**: Custom CUDA kernels minimize memory bandwidth requirements
 - **Gradient Optimization**: Efficient backward pass implementation
-
-## Mathematical Definition
-
-The XIELU activation function is defined as:
-
-```
-f(x) = {
-  α_p * x² + β * x,                                    if x > 0
-  α_n * (exp(min(x, ε)) - 1) - α_n * x + β * x,       if x ≤ 0
-}
-```
-
-Where:
-- `α_p = softplus(alpha_p)`: Learned positive slope parameter
-- `α_n = β + softplus(alpha_n)`: Learned negative slope parameter  
-- `β`: Fixed scaling factor
-- `ε`: Numerical stability parameter
