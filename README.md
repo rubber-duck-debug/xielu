@@ -108,7 +108,7 @@ xielu = XIELU(
 
 ### torch.compile Compatibility
 
-XIELU supports `torch.compile` for additional performance optimizations:
+XIELU supports `torch.compile` for additional performance optimizations and integration with compilable models:
 
 ```python
 import torch
