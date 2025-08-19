@@ -4,7 +4,7 @@ XIELU is a high-performance CUDA implementation of a parameterized activation fu
 
 ## Mathematical Definition
 
-The XIELU activation function is defined as:
+The XIELU activation function (https://arxiv.org/abs/2411.13010) is defined as:
 
 ```
 f(x) = {
