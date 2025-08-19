@@ -42,8 +42,7 @@ XIELU implements a custom activation function with learnable parameters `alpha_p
 
 XIELU provides three implementation variants for different use cases:
 
-- **`XIELU`**: CUDA-accelerated implementation (recommended for production)
-- **`XIELUCpp`**: CUDA-accelerated implementation, but wrapped in pytorch Autograd function. (recommended for production)
+- **`XIELU`**: CUDA-accelerated implementation with `torch.compile` support (recommended for production)
 - **`XIELUfn`**: Pure PyTorch with custom autograd function
 - **`XIELUPy`**: Pure PyTorch implementation (reference implementation)
 
@@ -105,6 +104,31 @@ xielu = XIELU(
     device=device,
     with_vector_loads=True  # Enable optimized memory access
 )
+```
+
+### torch.compile Compatibility
+
+XIELU supports `torch.compile` for additional performance optimizations:
+
+```python
+import torch
+from xielu.ops.wrappers import XIELU
+
+# Create model with XIELU activation
+class MyModel(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.xielu = XIELU(device=torch.device("cuda"))
+    
+    def forward(self, x):
+        return self.xielu(x)
+
+# Compile the model for optimized performance
+model = MyModel()
+compiled_model = torch.compile(model)
+
+# Use as normal - now with compilation optimizations
+output = compiled_model(input_tensor)
 ```
 
 ## Development

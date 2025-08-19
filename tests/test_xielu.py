@@ -1,7 +1,7 @@
 import unittest
 import torch
 from torch.autograd import gradcheck
-from xielu.ops.wrappers import XIELUPy, XIELUfn, XIELU, XIELUCpp
+from xielu.ops.wrappers import XIELUPy, XIELUfn, XIELU
 
 import torch.nn.functional as F
 
@@ -34,19 +34,19 @@ class TestXIELU(unittest.TestCase):
                                 self.beta, self.eps, self.device, self.input.dtype)
         self.xielu = XIELU(self.alpha_p_init, self.alpha_n_init,
                            self.beta, self.eps, self.device, self.input.dtype)
-        self.xielu_cpp = XIELUCpp(self.alpha_p_init, self.alpha_n_init,
-                           self.beta, self.eps, self.device, self.input.dtype)
+        self.xielu_compiled = torch.compile(XIELU(self.alpha_p_init, self.alpha_n_init,
+                           self.beta, self.eps, self.device, self.input.dtype))
 
     def run_forward_comparison(self, input_tensor):
         output_py = self.xielu_py(input_tensor)
         output_fn = self.xielu_fn(input_tensor)
         output_cuda = self.xielu(input_tensor)
-        output_cuda_2 = self.xielu_cpp(input_tensor)
+        output_compiled = self.xielu_compiled(input_tensor)
         torch.testing.assert_close(output_py, output_fn, rtol=1e-5, atol=1e-5)
         torch.testing.assert_close(
             output_py, output_cuda, rtol=1e-6, atol=1e-6)
         torch.testing.assert_close(
-            output_py, output_cuda_2, rtol=1e-6, atol=1e-6)
+            output_py, output_compiled, rtol=1e-6, atol=1e-6)
 
     def test_forward(self):
         self.run_forward_comparison(self.input)
@@ -61,7 +61,7 @@ class TestXIELU(unittest.TestCase):
         self.run_gradcheck(self.xielu, (self.input,))
         self.run_gradcheck(self.xielu_py, (self.input,))
         self.run_gradcheck(self.xielu_fn, (self.input,))
-        self.run_gradcheck(self.xielu_cpp, (self.input,))
+        self.run_gradcheck(self.xielu_compiled, (self.input,))
 
     def test_alpha_p_alpha_n_gradients(self):
         self.run_gradcheck(self.xielu_py.forward_inference, (self.input,

@@ -2,6 +2,7 @@ import torch
 import torch.nn.functional as F
 
 
+
 @torch.no_grad()
 def create_xielu_params(alpha_p_init=0.8, alpha_n_init=0.8, beta=0.5, eps=-1e-6, device=None, dtype=None):
     dev_kwargs = {"device": device, "dtype": dtype}
@@ -86,24 +87,9 @@ class XIELUfn(torch.nn.Module):
 
 
 class XIELU(torch.nn.Module):
-    def __init__(self, alpha_p_init=0.8, alpha_n_init=0.8, beta=0.5, eps=-1e-6, device=None, dtype=None, with_vector_loads=True):
-        super().__init__()
-        self.alpha_p, self.alpha_n, self.beta, self.eps = create_xielu_params(
-            alpha_p_init, alpha_n_init, beta, eps, device, dtype)
-        self.with_vector_loads = with_vector_loads
-        self.cuda_obj = torch.classes.xielu.XIELU()
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.cuda_obj.forward(x, self.alpha_p, self.alpha_n, self.beta, self.eps, self.with_vector_loads)
-
-    def forward_inference(self, x: torch.Tensor, a_p, a_n) -> torch.Tensor:
-        return self.cuda_obj.forward(x, a_p, a_n, self.beta, self.eps, self.with_vector_loads)
-
-
-class XIELUCpp(torch.nn.Module):
-    """XIELU implementation using C++ forward_impl and backward_impl functions"""
-
-    class XIELUCppFunction(torch.autograd.Function):
+    """XIELU implementation using custom ops compatible with torch.compile"""
+    
+    class XIELUFunction(torch.autograd.Function):
         @staticmethod
         def forward(ctx, x, alpha_p, alpha_n, beta, eps, with_vector_loads):
             # Save tensors for backward pass
@@ -112,8 +98,12 @@ class XIELUCpp(torch.nn.Module):
             ctx.eps = eps
             ctx.with_vector_loads = with_vector_loads
 
-            # Call C++ forward implementation
-            return torch.ops.xielu.forward_impl(x, alpha_p, alpha_n, beta, eps, with_vector_loads)
+            # Extract scalar values from tensors for custom op
+            beta_val = beta.item() if torch.is_tensor(beta) else float(beta)
+            eps_val = eps.item() if torch.is_tensor(eps) else float(eps)
+
+            # Use the custom operation
+            return xielu_forward(x, alpha_p, alpha_n, beta_val, eps_val, with_vector_loads)
 
         @staticmethod
         def backward(ctx, grad_output):
@@ -123,14 +113,17 @@ class XIELUCpp(torch.nn.Module):
             eps = ctx.eps
             with_vector_loads = ctx.with_vector_loads
 
-            # Call C++ backward implementation
-            gradients = torch.ops.xielu.backward_impl(
-                x, alpha_p, alpha_n, eps, beta, with_vector_loads, grad_output
+            # Extract scalar values from tensors for custom op
+            beta_val = beta.item() if torch.is_tensor(beta) else float(beta)
+            eps_val = eps.item() if torch.is_tensor(eps) else float(eps)
+
+            # Use the custom backward operation
+            grad_x, grad_alpha_p, grad_alpha_n = xielu_backward(
+                x, alpha_p, alpha_n, eps_val, beta_val, with_vector_loads, grad_output
             )
 
             # Return gradients in the same order as forward inputs
-            # [grad_x, grad_alpha_p, grad_alpha_n, grad_beta, grad_eps, grad_with_vector_loads]
-            return gradients[0], gradients[1], gradients[2], None, None, None
+            return grad_x, grad_alpha_p, grad_alpha_n, None, None, None
 
     def __init__(self, alpha_p_init=0.8, alpha_n_init=0.8, beta=0.5, eps=-1e-6, device=None, dtype=None, with_vector_loads=True):
         super().__init__()
@@ -139,11 +132,55 @@ class XIELUCpp(torch.nn.Module):
         self.with_vector_loads = with_vector_loads
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.XIELUCppFunction.apply(
+        return self.XIELUFunction.apply(
             x, self.alpha_p, self.alpha_n, self.beta, self.eps, self.with_vector_loads
         )
 
     def forward_inference(self, x: torch.Tensor, a_p, a_n) -> torch.Tensor:
-        return self.XIELUCppFunction.apply(
+        return self.XIELUFunction.apply(
             x, a_p, a_n, self.beta, self.eps, self.with_vector_loads
         )
+
+
+# Define custom operators for torch.compile compatibility
+@torch.library.custom_op("xielu::xielu_forward", mutates_args=())
+def xielu_forward(x: torch.Tensor, alpha_p: torch.Tensor, alpha_n: torch.Tensor, 
+                  beta: float, eps: float, with_vector_loads: bool) -> torch.Tensor:
+    """Custom XIELU forward operation compatible with torch.compile"""
+    return torch.ops.xielu.forward_impl(x, alpha_p, alpha_n, beta, eps, with_vector_loads)
+
+@xielu_forward.register_fake
+def _(x: torch.Tensor, alpha_p: torch.Tensor, alpha_n: torch.Tensor, 
+      beta: float, eps: float, with_vector_loads: bool) -> torch.Tensor:
+    torch._check(x.dtype in [torch.float16, torch.bfloat16, torch.float32, torch.float64])
+    torch._check(alpha_p.numel() == 1, "alpha_p must be a scalar tensor")
+    torch._check(alpha_n.numel() == 1, "alpha_n must be a scalar tensor")
+    torch._check(x.device == alpha_p.device and x.device == alpha_n.device)
+    return torch.empty_like(x)
+
+@torch.library.custom_op("xielu::xielu_backward", mutates_args=())
+def xielu_backward(x: torch.Tensor, alpha_p: torch.Tensor, alpha_n: torch.Tensor,
+                   eps: float, beta: float, with_vector_loads: bool, 
+                   grad_output: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Custom XIELU backward operation compatible with torch.compile"""
+    gradients = torch.ops.xielu.backward_impl(x, alpha_p, alpha_n, eps, beta, with_vector_loads, grad_output)
+    return gradients[0], gradients[1], gradients[2]
+
+@xielu_backward.register_fake  
+def _(x: torch.Tensor, alpha_p: torch.Tensor, alpha_n: torch.Tensor,
+      eps: float, beta: float, with_vector_loads: bool, 
+      grad_output: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    torch._check(x.dtype in [torch.float16, torch.bfloat16, torch.float32, torch.float64])
+    torch._check(grad_output.shape == x.shape)
+    torch._check(alpha_p.numel() == 1, "alpha_p must be a scalar tensor")
+    torch._check(alpha_n.numel() == 1, "alpha_n must be a scalar tensor")
+    torch._check(x.device == alpha_p.device and x.device == alpha_n.device)
+    torch._check(x.device == grad_output.device)
+    
+    grad_x = torch.empty_like(x)
+    grad_alpha_p = torch.empty_like(alpha_p)
+    grad_alpha_n = torch.empty_like(alpha_n)
+    return grad_x, grad_alpha_p, grad_alpha_n
+
+
+
