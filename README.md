@@ -25,10 +25,9 @@ XIELU implements a custom activation function with learnable parameters `alpha_p
 
 ### Features
 
-- **CUDA Accelerated**: Optimized CUDA kernels for maximum performance on NVIDIA GPUs
-- **PyTorch Integration**: Seamless integration with PyTorch's autograd system
-- **Flexible Precision**: Support for different floating-point precisions including bfloat16 optimizations
-- **Memory Efficient**: Optimized memory access patterns for improved throughput
+- **CUDA Accelerated**: Optimized CUDA kernels for high performance on NVIDIA GPUs
+- **PyTorch Integration**: Integration with PyTorch's autograd system
+- **Flexible Precision**: Support for different floating-point precisions including bfloat16 and half precision optimizations
 - **Gradient Support**: Full backward pass implementation for training
 
 ## Installation
@@ -193,5 +192,4 @@ CMAKE_VERBOSE_MAKEFILE=1 pip install -e . --no-build-isolation --no-deps
 
 - **Vectorized Memory Access**: Enable `with_vector_loads=True` for improved memory throughput
 - **Reduced Precision**: Support for bfloat16 operations for faster inference
-- **Fused Operations**: Custom CUDA kernels minimize memory bandwidth requirements
 - **Gradient Optimization**: Efficient backward pass implementation
