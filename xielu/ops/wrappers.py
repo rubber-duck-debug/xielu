@@ -92,15 +92,16 @@ class XIELU(torch.nn.Module):
 
     class XIELUFunction(torch.autograd.Function):
         @staticmethod
-        def forward(ctx, x, alpha_p, alpha_n, beta: float, eps: float, with_vector_loads: bool):
+        def forward(ctx, x, alpha_p, alpha_n, beta: float, eps: float, with_vector_loads: bool, use_stochastic_rounding: bool):
             # Save tensors for backward pass
             ctx.save_for_backward(x, alpha_p, alpha_n)
             ctx.beta = beta
             ctx.eps = eps
             ctx.with_vector_loads = with_vector_loads
+            ctx.use_stochastic_rounding = use_stochastic_rounding
 
             # Use the custom operation
-            return xielu_forward(x, alpha_p, alpha_n, beta, eps, with_vector_loads)
+            return xielu_forward(x, alpha_p, alpha_n, beta, eps, with_vector_loads, use_stochastic_rounding)
 
         @staticmethod
         def backward(ctx, grad_output):
@@ -109,43 +110,45 @@ class XIELU(torch.nn.Module):
             beta = ctx.beta
             eps = ctx.eps
             with_vector_loads = ctx.with_vector_loads
+            use_stochastic_rounding = ctx.use_stochastic_rounding
 
             # Use the custom backward operation
             grad_x, grad_alpha_p, grad_alpha_n = xielu_backward(
-                x, alpha_p, alpha_n, eps, beta, with_vector_loads, grad_output
+                x, alpha_p, alpha_n, eps, beta, with_vector_loads, use_stochastic_rounding, grad_output
             )
 
             # Return gradients in the same order as forward inputs
-            return grad_x, grad_alpha_p, grad_alpha_n, None, None, None
+            return grad_x, grad_alpha_p, grad_alpha_n, None, None, None, None
 
-    def __init__(self, alpha_p_init=0.8, alpha_n_init=0.8, beta=0.5, eps=-1e-6, device=None, dtype=None, with_vector_loads=True):
+    def __init__(self, alpha_p_init=0.8, alpha_n_init=0.8, beta=0.5, eps=-1e-6, device=None, dtype=None, with_vector_loads=True, use_stochastic_rounding=False):
         super().__init__()
         self.alpha_p, self.alpha_n, self.beta, self.eps = create_xielu_params(
             alpha_p_init, alpha_n_init, beta, eps, device, dtype)
         self.with_vector_loads = with_vector_loads
+        self.use_stochastic_rounding = use_stochastic_rounding
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.XIELUFunction.apply(
-            x, self.alpha_p, self.alpha_n, self.beta, self.eps, self.with_vector_loads
+            x, self.alpha_p, self.alpha_n, self.beta, self.eps, self.with_vector_loads, self.use_stochastic_rounding
         )
 
     def forward_inference(self, x: torch.Tensor, a_p, a_n) -> torch.Tensor:
         return self.XIELUFunction.apply(
-            x, a_p, a_n, self.beta, self.eps, self.with_vector_loads
+            x, a_p, a_n, self.beta, self.eps, self.with_vector_loads, self.use_stochastic_rounding
         )
 
 
 # Define custom operators for torch.compile compatibility
 @torch.library.custom_op("xielu::xielu_forward", mutates_args=())
 def xielu_forward(x: torch.Tensor, alpha_p: torch.Tensor, alpha_n: torch.Tensor,
-                  beta: float, eps: float, with_vector_loads: bool) -> torch.Tensor:
+                  beta: float, eps: float, with_vector_loads: bool, use_stochastic_rounding: bool) -> torch.Tensor:
     """Custom XIELU forward operation compatible with torch.compile"""
-    return torch.ops.xielu.forward_impl(x, alpha_p, alpha_n, beta, eps, with_vector_loads)
+    return torch.ops.xielu.forward_impl(x, alpha_p, alpha_n, beta, eps, with_vector_loads, use_stochastic_rounding)
 
 
 @xielu_forward.register_fake
 def _(x: torch.Tensor, alpha_p: torch.Tensor, alpha_n: torch.Tensor,
-      beta: float, eps: float, with_vector_loads: bool) -> torch.Tensor:
+      beta: float, eps: float, with_vector_loads: bool, use_stochastic_rounding: bool) -> torch.Tensor:
     torch._check(x.dtype in [torch.float16,
                  torch.bfloat16, torch.float32, torch.float64])
     torch._check(alpha_p.numel() == 1, "alpha_p must be a scalar tensor")
@@ -156,17 +159,17 @@ def _(x: torch.Tensor, alpha_p: torch.Tensor, alpha_n: torch.Tensor,
 
 @torch.library.custom_op("xielu::xielu_backward", mutates_args=())
 def xielu_backward(x: torch.Tensor, alpha_p: torch.Tensor, alpha_n: torch.Tensor,
-                   eps: float, beta: float, with_vector_loads: bool,
+                   eps: float, beta: float, with_vector_loads: bool, use_stochastic_rounding: bool,
                    grad_output: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Custom XIELU backward operation compatible with torch.compile"""
     gradients = torch.ops.xielu.backward_impl(
-        x, alpha_p, alpha_n, eps, beta, with_vector_loads, grad_output)
+        x, alpha_p, alpha_n, eps, beta, with_vector_loads, use_stochastic_rounding, grad_output)
     return gradients[0], gradients[1], gradients[2]
 
 
 @xielu_backward.register_fake
 def _(x: torch.Tensor, alpha_p: torch.Tensor, alpha_n: torch.Tensor,
-      eps: float, beta: float, with_vector_loads: bool,
+      eps: float, beta: float, with_vector_loads: bool, use_stochastic_rounding: bool,
       grad_output: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     torch._check(x.dtype in [torch.float16,
                  torch.bfloat16, torch.float32, torch.float64])
