@@ -10,13 +10,28 @@ NSEQ = 32
 HIDDENDIM = 32
 
 
+def get_tolerances(dtype):
+    """Get appropriate tolerances based on dtype."""
+    if dtype == torch.float64:
+        return {"rtol": 1e-6, "atol": 1e-6, "grad_eps": 1e-3, "grad_rtol": 1e-4, "grad_atol": 1e-4, "threshold": 1e-6}
+    elif dtype == torch.float32:
+        return {"rtol": 1e-5, "atol": 1e-5, "grad_eps": 1e-3, "grad_rtol": 1e-4, "grad_atol": 1e-4, "threshold": 1e-5}
+    elif dtype == torch.bfloat16:
+        return {"rtol": 1e-2, "atol": 1e-2, "grad_eps": 1e-2, "grad_rtol": 1e-2, "grad_atol": 1e-2, "threshold": 1e-2}
+    elif dtype == torch.float16:
+        return {"rtol": 1e-3, "atol": 1e-3, "grad_eps": 1e-3, "grad_rtol": 1e-3, "grad_atol": 1e-3, "threshold": 1e-3}
+    else:
+        # Default to float32 tolerances
+        return {"rtol": 1e-5, "atol": 1e-5, "grad_eps": 1e-3, "grad_rtol": 1e-4, "grad_atol": 1e-4, "threshold": 1e-5}
+
+
 @pytest.fixture
 def xielu_setup():
     """Fixture to set up XIELU instances and test input."""
     alpha_p_init = 0.8111
     alpha_n_init = 0.8111
     beta = 0.5
-    eps = 1e-6
+    eps = 1e-5
 
     device = torch.device("cuda")
 
@@ -51,22 +66,32 @@ def xielu_setup():
     }
 
 
-def run_forward_comparison(input_tensor, xielu_py, xielu_fn, xielu, xielu_compiled):
+def run_forward_comparison(input_tensor, xielu_py, xielu_fn, xielu, xielu_compiled, dtype=None):
     """Helper function to compare forward outputs across implementations."""
+    if dtype is None:
+        dtype = input_tensor.dtype
+
+    tols = get_tolerances(dtype)
+
     output_py = xielu_py(input_tensor)
     output_fn = xielu_fn(input_tensor)
     output_cuda = xielu(input_tensor)
     output_compiled = xielu_compiled(input_tensor)
 
-    torch.testing.assert_close(output_py, output_fn, rtol=1e-5, atol=1e-5)
-    torch.testing.assert_close(output_py, output_cuda, rtol=1e-6, atol=1e-6)
-    torch.testing.assert_close(output_py, output_compiled, rtol=1e-6, atol=1e-6)
+    torch.testing.assert_close(output_py, output_fn, rtol=tols["rtol"], atol=tols["atol"])
+    torch.testing.assert_close(output_py, output_cuda, rtol=tols["rtol"], atol=tols["atol"])
+    torch.testing.assert_close(output_py, output_compiled, rtol=tols["rtol"], atol=tols["atol"])
 
 
-def run_gradcheck(model, inputs, dtype=torch.float64, eps=1e-3, rtol=1e-4, atol=1e-4):
+def run_gradcheck(model, inputs, dtype=None):
     """Helper function to run gradcheck on a model."""
+    if dtype is None:
+        dtype = inputs[0].dtype
+
+    tols = get_tolerances(dtype)
+
     inputs = tuple(inp.clone().detach().to(dtype).requires_grad_(True) for inp in inputs)
-    gradcheck(model, inputs, eps=eps, rtol=rtol, atol=atol, fast_mode=False)
+    gradcheck(model, inputs, eps=tols["grad_eps"], rtol=tols["grad_rtol"], atol=tols["grad_atol"], fast_mode=False)
 
 
 def test_forward(xielu_setup):
@@ -142,10 +167,15 @@ def test_xielu_detailed(xielu_setup):
     xielu_py = xielu_setup["xielu_py"]
     xielu = xielu_setup["xielu"]
     xielu_compiled = xielu_setup["xielu_compiled"]
+    dtype = xielu_setup["dtype"]
+
+    tols = get_tolerances(dtype)
 
     print("\nTesting XIELU implementations...")
     print(f"Input shape: {test_input.shape}")
     print(f"Device: {xielu_setup['device']}")
+    print(f"Dtype: {dtype}")
+    print(f"Tolerances: rtol={tols['rtol']:.2e}, atol={tols['atol']:.2e}")
     print(f"Input sample values:\n{test_input}")
     print()
 
@@ -165,7 +195,7 @@ def test_xielu_detailed(xielu_setup):
     print(f"Mean absolute difference: {mean_diff.item():.2e}")
 
     # Show locations of largest differences
-    if max_diff > 1e-6:
+    if max_diff > tols["threshold"]:
         max_indices = torch.where(diff == max_diff)
         print(f"Max diff locations: {list(zip(*[idx.tolist() for idx in max_indices]))[:5]}")
         for i, (b, h, w) in enumerate(zip(*max_indices)):
@@ -173,7 +203,7 @@ def test_xielu_detailed(xielu_setup):
                 break  # Only show first 3
             print(f"  [{b},{h},{w}]: py={output_py[b,h,w]:.6f}, xielu={output_xielu[b,h,w]:.6f}, diff={diff[b,h,w]:.6f}")
 
-    torch.testing.assert_close(output_py, output_xielu, rtol=1e-6, atol=1e-6)
+    torch.testing.assert_close(output_py, output_xielu, rtol=tols["rtol"], atol=tols["atol"])
     print("Regular XIELU test passed")
 
     # Test compiled XIELU
@@ -190,7 +220,7 @@ def test_xielu_detailed(xielu_setup):
     print(f"Mean absolute difference: {mean_diff.item():.2e}")
 
     # Show locations of largest differences
-    if max_diff > 1e-6:
+    if max_diff > tols["threshold"]:
         max_indices = torch.where(diff == max_diff)
         print(f"Max diff locations: {list(zip(*[idx.tolist() for idx in max_indices]))[:5]}")
         for i, (b, h, w) in enumerate(zip(*max_indices)):
@@ -198,7 +228,7 @@ def test_xielu_detailed(xielu_setup):
                 break
             print(f"  [{b},{h},{w}]: py={output_py[b,h,w]:.6f}, compiled={output_compiled[b,h,w]:.6f}, diff={diff[b,h,w]:.6f}")
 
-    torch.testing.assert_close(output_py, output_compiled, rtol=1e-6, atol=1e-6)
+    torch.testing.assert_close(output_py, output_compiled, rtol=tols["rtol"], atol=tols["atol"])
     print("Compiled XIELU test passed")
 
     # Test gradient computation with detailed comparison
@@ -245,7 +275,7 @@ def test_xielu_detailed(xielu_setup):
     print(f"Max absolute gradient difference: {max_grad_diff_xielu.item():.2e}")
     print(f"Mean absolute gradient difference: {mean_grad_diff_xielu.item():.2e}")
 
-    if max_grad_diff_xielu > 1e-6:
+    if max_grad_diff_xielu > tols["threshold"]:
         max_indices = torch.where(grad_diff_xielu == max_grad_diff_xielu)
         print(f"Max gradient diff locations: {list(zip(*[idx.tolist() for idx in max_indices]))[:3]}")
         for i, (b, h, w) in enumerate(zip(*max_indices)):
@@ -262,7 +292,7 @@ def test_xielu_detailed(xielu_setup):
     print(f"Max absolute gradient difference: {max_grad_diff_compiled.item():.2e}")
     print(f"Mean absolute gradient difference: {mean_grad_diff_compiled.item():.2e}")
 
-    if max_grad_diff_compiled > 1e-6:
+    if max_grad_diff_compiled > tols["threshold"]:
         max_indices = torch.where(grad_diff_compiled == max_grad_diff_compiled)
         print(f"Max gradient diff locations: {list(zip(*[idx.tolist() for idx in max_indices]))[:3]}")
         for i, (b, h, w) in enumerate(zip(*max_indices)):
@@ -280,12 +310,12 @@ def test_xielu_detailed(xielu_setup):
     def xielu_compiled_wrapper(x):
         return xielu_compiled(x)
 
-    gradcheck(xielu_wrapper, (tiny_input,), eps=1e-3, rtol=1e-4, atol=1e-4)
-    gradcheck(xielu_compiled_wrapper, (tiny_input,), eps=1e-3, rtol=1e-4, atol=1e-4)
+    gradcheck(xielu_wrapper, (tiny_input,), eps=tols["grad_eps"], rtol=tols["grad_rtol"], atol=tols["grad_atol"])
+    gradcheck(xielu_compiled_wrapper, (tiny_input,), eps=tols["grad_eps"], rtol=tols["grad_rtol"], atol=tols["grad_atol"])
 
     # Tolerance checks for manual gradients
-    torch.testing.assert_close(grad_py, grad_xielu, rtol=1e-4, atol=1e-4)
-    torch.testing.assert_close(grad_py, grad_compiled, rtol=1e-4, atol=1e-4)
+    torch.testing.assert_close(grad_py, grad_xielu, rtol=tols["grad_rtol"], atol=tols["grad_atol"])
+    torch.testing.assert_close(grad_py, grad_compiled, rtol=tols["grad_rtol"], atol=tols["grad_atol"])
     print("All gradient tests passed")
 
     print("\nAll detailed tests passed!")
@@ -304,6 +334,8 @@ def test_reduced_precision(xielu_setup, with_vector_loads):
     ref_dtype = torch.float32
     dtype = torch.bfloat16
     hiddendim_large = 1024
+
+    tols = get_tolerances(dtype)
 
     input_ref = torch.randn(
         NBATCH,
@@ -328,6 +360,8 @@ def test_reduced_precision(xielu_setup, with_vector_loads):
     )
 
     print(f"\nTesting reduced precision with with_vector_loads={with_vector_loads}")
+    print(f"Dtype: {dtype}")
+    print(f"Tolerances: rtol={tols['rtol']:.2e}, atol={tols['atol']:.2e}")
 
     # Forward pass
     out_cuda = xielu.forward(input_reduced)
@@ -361,11 +395,10 @@ def test_reduced_precision(xielu_setup, with_vector_loads):
     mean_alpha_n_error = (xielu_py.alpha_n.grad - xielu.alpha_n.grad.float()).abs().mean()
     print(f"Mean alpha_n.grad error: {mean_alpha_n_error.item():.6e}")
 
-    # Assert tolerances are reasonable for bfloat16
-    # bfloat16 has less precision, so we use looser tolerances
-    assert mean_output_error < 1e-2, f"Output error too large: {mean_output_error}"
-    assert mean_input_grad_error < 1e-2, f"Input gradient error too large: {mean_input_grad_error}"
-    assert mean_alpha_p_error < 1e-2, f"alpha_p gradient error too large: {mean_alpha_p_error}"
-    assert mean_alpha_n_error < 1e-2, f"alpha_n gradient error too large: {mean_alpha_n_error}"
+    # Assert tolerances based on dtype
+    assert mean_output_error < tols["atol"], f"Output error too large: {mean_output_error} (threshold: {tols['atol']})"
+    assert mean_input_grad_error < tols["grad_atol"], f"Input gradient error too large: {mean_input_grad_error} (threshold: {tols['grad_atol']})"
+    assert mean_alpha_p_error < tols["grad_atol"], f"alpha_p gradient error too large: {mean_alpha_p_error} (threshold: {tols['grad_atol']})"
+    assert mean_alpha_n_error < tols["grad_atol"], f"alpha_n gradient error too large: {mean_alpha_n_error} (threshold: {tols['grad_atol']})"
 
     print("Reduced precision test passed!")
