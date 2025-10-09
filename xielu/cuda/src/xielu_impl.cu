@@ -386,12 +386,24 @@ torch::Tensor forward_impl(Tensor &x, Tensor &alpha_p, Tensor &alpha_n,
   TORCH_CHECK(x.dtype() == alpha_n.dtype(), "Data type of x (", x.dtype(),
               ") must match data type of alpha_n (", alpha_n.dtype(), ").");
 
-  const int batch_size = x.size(0);
-  const int seq_len = x.size(1);
-  const int hidden_dim = x.size(2);
-  const int nelements = batch_size * seq_len * hidden_dim;
+  // Support both [B, S, D] and [B*S, D] shapes
+  TORCH_CHECK(x.dim() == 2 || x.dim() == 3,
+              "Input tensor must be 2D [B*S, D] or 3D [B, S, D], got ", x.dim(), "D");
 
-  TORCH_CHECK(hidden_dim % 8 == 0, "hidden_dim must be a multiple of 4");
+  int hidden_dim;
+  int nelements;
+
+  if (x.dim() == 3) {
+    // [B, S, D] format
+    hidden_dim = x.size(2);
+    nelements = x.size(0) * x.size(1) * x.size(2);
+  } else {
+    // [B*S, D] format
+    hidden_dim = x.size(1);
+    nelements = x.size(0) * x.size(1);
+  }
+
+  TORCH_CHECK(hidden_dim % 8 == 0, "hidden_dim must be a multiple of 8, got ", hidden_dim);
 
   const int blockSize = NWARPS * WARP_SIZE;
 
@@ -738,12 +750,24 @@ std::vector<torch::Tensor> backward_impl(Tensor &x, Tensor &alpha_p,
   TORCH_CHECK(x.dtype() == alpha_n.dtype(), "Data type of x (", x.dtype(),
               ") must match data type of alpha_n (", alpha_n.dtype(), ").");
 
-  const int nbatch = x.size(0);
-  const int seq_len = x.size(1);
-  const int hidden_dim = x.size(2);
-  const int nelements = nbatch * seq_len * hidden_dim;
+  // Support both [B, S, D] and [B*S, D] shapes
+  TORCH_CHECK(x.dim() == 2 || x.dim() == 3,
+              "Input tensor must be 2D [B*S, D] or 3D [B, S, D], got ", x.dim(), "D");
 
-  TORCH_CHECK(hidden_dim % 4 == 0, "hidden_dim must be a multiple of 4");
+  int hidden_dim;
+  int nelements;
+
+  if (x.dim() == 3) {
+    // [B, S, D] format
+    hidden_dim = x.size(2);
+    nelements = x.size(0) * x.size(1) * x.size(2);
+  } else {
+    // [B*S, D] format
+    hidden_dim = x.size(1);
+    nelements = x.size(0) * x.size(1);
+  }
+
+  TORCH_CHECK(hidden_dim % 8 == 0, "hidden_dim must be a multiple of 8, got ", hidden_dim);
 
   const int blockSize = NWARPS * WARP_SIZE;
 
