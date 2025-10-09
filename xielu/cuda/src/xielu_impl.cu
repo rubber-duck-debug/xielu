@@ -191,6 +191,51 @@ __device__ __forceinline__ float to_float_if_needed(float x) { return x; }
 // Overload for double: return as-is
 __device__ __forceinline__ double to_float_if_needed(double x) { return x; }
 
+// Stochastic rounding from F32 to BF16/FP16
+// Based on the algorithm:
+// For an FP32 number [a31, ..., a16, a15, ..., a0] to be converted to BF16:
+// - Round towards zero:   [a31, ..., a16,   0, ...,  0]
+// - Round away from zero: [a31, ..., a16+1, 0, ...,  0]
+// We round away from zero with probability = [a15, ..., a0] / 2^16
+template <typename scalar_t>
+__device__ __forceinline__ scalar_t stochastic_round_f32(float value, unsigned int random_bits) {
+  // For float32/float64, just return the value
+  if constexpr (std::is_same<scalar_t, float>::value || std::is_same<scalar_t, double>::value) {
+    return static_cast<scalar_t>(value);
+  } else {
+    // For bfloat16/half: stochastic rounding
+    unsigned int value_bits = __float_as_uint(value);
+    unsigned int fraction = value_bits & 0xFFFF;  // lower 16 bits
+    unsigned int bf16_towards_zero = value_bits & 0xFFFF0000;  // upper 16 bits
+
+    // Round away from zero with probability = fraction / 2^16
+    unsigned int result_bits = (random_bits < fraction)
+        ? bf16_towards_zero + 0x10000  // round away from zero
+        : bf16_towards_zero;  // round towards zero
+
+    float result_f32 = __uint_as_float(result_bits);
+    return static_cast<scalar_t>(result_f32);
+  }
+}
+
+// LCG-based PRNG for fast random number generation in CUDA
+// Using parameters from Numerical Recipes
+__device__ __forceinline__ unsigned int lcg_random(unsigned int &state) {
+  state = 1664525u * state + 1013904223u;
+  return state;
+}
+
+// Initialize PRNG state based on thread/block ID and a global seed
+__device__ __forceinline__ unsigned int init_random_state(unsigned int seed = 0) {
+  unsigned int tid = threadIdx.x + blockIdx.x * blockDim.x;
+  // Use clock64() to add some entropy
+  unsigned int state = tid ^ seed ^ (unsigned int)clock64();
+  // Warm up the generator
+  lcg_random(state);
+  lcg_random(state);
+  return state;
+}
+
 template <typename scalar_t>
 __device__ __forceinline__ scalar_t compute_expm1(const scalar_t x) {
   float x_f = to_float_if_needed(x);
@@ -208,86 +253,12 @@ __device__ scalar_t compute(scalar_t v, const scalar_t s_alpha_p,
                    s_alpha_n * v;
 }
 
-template <typename T> __device__ __forceinline__ T select2(T cond, T a, T b);
-
-template <>
-__device__ __forceinline__ __nv_bfloat162 select2<__nv_bfloat162>(
-    __nv_bfloat162 cond, __nv_bfloat162 a, __nv_bfloat162 b) {
-  __nv_bfloat16 cond0 = __low2bfloat16(cond);
-  __nv_bfloat16 cond1 = __high2bfloat16(cond);
-  __nv_bfloat16 a0 = __low2bfloat16(a);
-  __nv_bfloat16 a1 = __high2bfloat16(a);
-  __nv_bfloat16 b0 = __low2bfloat16(b);
-  __nv_bfloat16 b1 = __high2bfloat16(b);
-
-  __nv_bfloat16 out0 = cond0 != __float2bfloat16_rn(0.0f) ? a0 : b0;
-  __nv_bfloat16 out1 = cond1 != __float2bfloat16_rn(0.0f) ? a1 : b1;
-
-  return __halves2bfloat162(out0, out1);
-}
-
-template <>
-__device__ __forceinline__ __half2 select2<__half2>(__half2 cond, __half2 a,
-                                                    __half2 b) {
-  __half cond0 = __low2half(cond);
-  __half cond1 = __high2half(cond);
-  __half a0 = __low2half(a);
-  __half a1 = __high2half(a);
-  __half b0 = __low2half(b);
-  __half b1 = __high2half(b);
-
-  __half zero = __float2half(0.0f);
-  __half out0 = cond0 != zero ? a0 : b0;
-  __half out1 = cond1 != zero ? a1 : b1;
-
-  return __halves2half2(out0, out1);
-}
-
-// Type traits and math wrappers for __half2
-__device__ __forceinline__ __half2 zero2(__half2) {
-  return __float2half2_rn(0.0f);
-}
-__device__ __forceinline__ __half2 one2(__half2) {
-  return __float2half2_rn(1.0f);
-}
-__device__ __forceinline__ __half2 two2(__half2) {
-  return __float2half2_rn(2.0f);
-}
-
-// Type traits and math wrappers for __nv_bfloat162
-__device__ __forceinline__ __nv_bfloat162 zero2(__nv_bfloat162) {
-  return __float2bfloat162_rn(0.0f);
-}
-__device__ __forceinline__ __nv_bfloat162 one2(__nv_bfloat162) {
-  return __float2bfloat162_rn(1.0f);
-}
-__device__ __forceinline__ __nv_bfloat162 two2(__nv_bfloat162) {
-  return __float2bfloat162_rn(2.0f);
-}
-
-template <typename T>
-__device__ __forceinline__ T compute_f16(T v, const T s_alpha_p,
-                                         const T s_alpha_n, const T beta,
-                                         const T eps, const T beta_s_alpha_n) {
-  T zero = zero2(v);
-  T one = one2(v);
-  T exp_input = __hmin2(v, eps);
-
-  T expm1_val = h2exp(exp_input);
-  expm1_val = __hsub2(expm1_val, one);
-
-  T pos = __hmul2(__hadd2(__hmul2(s_alpha_p, v), beta), v);
-  T neg = __hsub2(__hmul2(beta_s_alpha_n, expm1_val), __hmul2(s_alpha_n, v));
-
-  T mask = __hgt2(v, zero);
-  return select2(mask, pos, neg);
-}
 
 template <typename scalar_t, const int nelements_per_thread>
 __global__ void vectorised_xielu_forward_impl(
     const scalar_t *__restrict__ x, int total_elements,
     const Accessor<scalar_t, 1> alpha_p, const Accessor<scalar_t, 1> alpha_n,
-    scalar_t beta, scalar_t eps, scalar_t *__restrict__ output) {
+    scalar_t beta, scalar_t eps, bool use_stochastic_rounding, scalar_t *__restrict__ output) {
 
   using Traits = VectorIO<scalar_t>;
   using vec_t = typename Traits::vec_t;
@@ -302,25 +273,8 @@ __global__ void vectorised_xielu_forward_impl(
   int idx = blockIdx.x * blockDim.x + threadIdx.x;
   int stride = blockDim.x * gridDim.x;
 
-  vec_t s_alpa_p2;
-  vec_t s_alpa_n2;
-  vec_t beta2;
-  vec_t eps2;
-  vec_t beta_s_alpha_n2;
-
-  if constexpr (std::is_same<native_t, __nv_bfloat16>::value) {
-    s_alpa_p2 = __float2bfloat162_rn(s_alpha_p);
-    s_alpa_n2 = __float2bfloat162_rn(s_alpha_n);
-    beta2 = __float2bfloat162_rn(beta);
-    eps2 = __float2bfloat162_rn(eps);
-    beta_s_alpha_n2 = __float2bfloat162_rn(beta_s_alpha_n);
-  } else if constexpr (std::is_same<native_t, __half>::value) {
-    s_alpa_p2 = __float2half2_rn(s_alpha_p);
-    s_alpa_n2 = __float2half2_rn(s_alpha_n);
-    beta2 = __float2half2_rn(beta);
-    eps2 = __float2half2_rn(eps);
-    beta_s_alpha_n2 = __float2half2_rn(beta_s_alpha_n);
-  }
+  // Initialize PRNG state for stochastic rounding (only if enabled)
+  unsigned int rng_state = use_stochastic_rounding ? init_random_state() : 0;
 
   for (int i = idx; i < total_elements / (packed_size * nelements_per_thread);
        i += stride) {
@@ -328,13 +282,47 @@ __global__ void vectorised_xielu_forward_impl(
 
     if constexpr (std::is_same<native_t, __nv_bfloat16>::value ||
                   std::is_same<native_t, __half>::value) {
-      // bfloat162 + half2 specialized handling
+      // half/bfloat16: vectorized load, F32 compute, vectorized store
+
+      // Hoist constant conversions outside the loop
+      float s_alpha_p_f = static_cast<float>(s_alpha_p);
+      float s_alpha_n_f = static_cast<float>(s_alpha_n);
+      float beta_f = static_cast<float>(beta);
+      float eps_f = static_cast<float>(eps);
+
 #pragma unroll
       for (int j = 0; j < nelements_per_thread; ++j) {
         vec_t x_v =
             reinterpret_cast<const vec_t &>(x[base_idx + j * packed_size]);
-        vec_t o_v = compute_f16(x_v, s_alpa_p2, s_alpa_n2, beta2, eps2,
-                                beta_s_alpha_n2);
+
+        // Unpack to scalar_t (c10::Half or c10::BFloat16)
+        scalar_t x0, x1;
+        Traits::unpack2(x_v, x0, x1);
+
+        // Convert to F32, compute
+        float x0_f = static_cast<float>(x0);
+        float x1_f = static_cast<float>(x1);
+
+        float out0_f = x0_f > 0.0f
+            ? x0_f * (s_alpha_p_f * x0_f + beta_f)
+            : (beta_f + s_alpha_n_f) * (expf(fminf(x0_f, eps_f)) - 1.0f) - s_alpha_n_f * x0_f;
+        float out1_f = x1_f > 0.0f
+            ? x1_f * (s_alpha_p_f * x1_f + beta_f)
+            : (beta_f + s_alpha_n_f) * (expf(fminf(x1_f, eps_f)) - 1.0f) - s_alpha_n_f * x1_f;
+
+        // Convert back to BF16/FP16 (with optional stochastic rounding)
+        scalar_t out0, out1;
+        if (use_stochastic_rounding) {
+          unsigned int rand0 = lcg_random(rng_state) & 0xFFFF;
+          unsigned int rand1 = lcg_random(rng_state) & 0xFFFF;
+          out0 = stochastic_round_f32<scalar_t>(out0_f, rand0);
+          out1 = stochastic_round_f32<scalar_t>(out1_f, rand1);
+        } else {
+          out0 = static_cast<scalar_t>(out0_f);
+          out1 = static_cast<scalar_t>(out1_f);
+        }
+
+        vec_t o_v = Traits::pack2(out0, out1);
         reinterpret_cast<vec_t &>(output[base_idx + j * packed_size]) = o_v;
       }
     } else {
@@ -380,7 +368,8 @@ xielu_forward_impl(const scalar_t *__restrict__ x, const int total_elements,
 }
 
 torch::Tensor forward_impl(Tensor &x, Tensor &alpha_p, Tensor &alpha_n,
-                           double beta, double eps, bool with_vector_loads) {
+                           double beta, double eps, bool with_vector_loads,
+                           bool use_stochastic_rounding) {
 
   PUSH_RANGE("XIELU_FWD", 0)
   TORCH_CHECK(x.is_cuda(), "Input tensor x must be on the CUDA device.");
@@ -397,12 +386,24 @@ torch::Tensor forward_impl(Tensor &x, Tensor &alpha_p, Tensor &alpha_n,
   TORCH_CHECK(x.dtype() == alpha_n.dtype(), "Data type of x (", x.dtype(),
               ") must match data type of alpha_n (", alpha_n.dtype(), ").");
 
-  const int batch_size = x.size(0);
-  const int seq_len = x.size(1);
-  const int hidden_dim = x.size(2);
-  const int nelements = batch_size * seq_len * hidden_dim;
+  // Support both [B, S, D] and [B*S, D] shapes
+  TORCH_CHECK(x.dim() == 2 || x.dim() == 3,
+              "Input tensor must be 2D [B*S, D] or 3D [B, S, D], got ", x.dim(), "D");
 
-  TORCH_CHECK(hidden_dim % 8 == 0, "hidden_dim must be a multiple of 4");
+  int hidden_dim;
+  int nelements;
+
+  if (x.dim() == 3) {
+    // [B, S, D] format
+    hidden_dim = x.size(2);
+    nelements = x.size(0) * x.size(1) * x.size(2);
+  } else {
+    // [B*S, D] format
+    hidden_dim = x.size(1);
+    nelements = x.size(0) * x.size(1);
+  }
+
+  TORCH_CHECK(hidden_dim % 8 == 0, "hidden_dim must be a multiple of 8, got ", hidden_dim);
 
   const int blockSize = NWARPS * WARP_SIZE;
 
@@ -438,7 +439,7 @@ torch::Tensor forward_impl(Tensor &x, Tensor &alpha_p, Tensor &alpha_n,
                   x.data_ptr<scalar_t>(), nelements,
                   get_accessor<scalar_t, 1>(alpha_p),
                   get_accessor<scalar_t, 1>(alpha_n), (scalar_t)beta,
-                  (scalar_t)eps, output.data_ptr<scalar_t>());
+                  (scalar_t)eps, use_stochastic_rounding, output.data_ptr<scalar_t>());
         } else {
 
           xielu_forward_impl<scalar_t><<<numBlocks, blockSize, 0, stream>>>(
@@ -457,14 +458,16 @@ torch::Tensor forward_impl(Tensor &x, Tensor &alpha_p, Tensor &alpha_n,
 torch::Tensor XIELUAutograd::forward(AutogradContext *ctx, Tensor &x,
                                      Tensor &alpha_p, Tensor &alpha_n,
                                      double beta, double eps,
-                                     bool with_vector_loads) {
+                                     bool with_vector_loads,
+                                     bool use_stochastic_rounding) {
   torch::Tensor output =
-      forward_impl(x, alpha_p, alpha_n, beta, eps, with_vector_loads);
+      forward_impl(x, alpha_p, alpha_n, beta, eps, with_vector_loads, use_stochastic_rounding);
 
   ctx->save_for_backward({x, alpha_p, alpha_n});
   ctx->saved_data["eps"] = eps;
   ctx->saved_data["beta"] = beta;
   ctx->saved_data["with_vector_loads"] = with_vector_loads;
+  ctx->saved_data["use_stochastic_rounding"] = use_stochastic_rounding;
 
   return output;
 }
@@ -474,25 +477,17 @@ __device__ __forceinline__ scalar_t compute_dx(scalar_t v, scalar_t dout,
                                                scalar_t s_alpha_p,
                                                scalar_t s_alpha_n,
                                                scalar_t beta, scalar_t eps) {
-  return to_float_if_needed(v) > scalar_t(0.0)
-             ? dout * (2 * s_alpha_p * v + beta)
-             : dout * (s_alpha_n * compute_expm1<scalar_t>(min(v, eps)) + beta);
-}
-
-template <typename T>
-__device__ __forceinline__ T compute_dx_f16(T v, T dout, T s_alpha_p,
-                                            T s_alpha_n, T beta, T eps) {
-  T zero = zero2(v);
-  T one = one2(v);
-  T two = two2(v);
-  T exp_input = __hmin2(v, eps);
-  T expm1_val = __hsub2(h2exp(exp_input), one);
-
-  T pos = __hmul2(dout, __hadd2(__hmul2(__hmul2(s_alpha_p, v), two), beta));
-  T neg = __hmul2(dout, __hadd2(__hmul2(s_alpha_n, expm1_val), beta));
-
-  T mask = __hgt2(v, zero);
-  return select2(mask, pos, neg);
+  if (to_float_if_needed(v) > scalar_t(0.0)) {
+    return dout * (2 * s_alpha_p * v + beta);
+  } else {
+    float v_f = to_float_if_needed(v);
+    float eps_f = to_float_if_needed(eps);
+    float beta_f = to_float_if_needed(beta);
+    float s_alpha_n_f = to_float_if_needed(s_alpha_n);
+    float dout_f = to_float_if_needed(dout);
+    float result = dout_f * ((beta_f + s_alpha_n_f) * expf(fminf(v_f, eps_f)) - s_alpha_n_f);
+    return static_cast<scalar_t>(result);
+  }
 }
 
 template <typename scalar_t>
@@ -500,15 +495,6 @@ __device__ __forceinline__ scalar_t compute_dp(scalar_t v, scalar_t dout,
                                                scalar_t ds_alpha_p) {
   return to_float_if_needed(v) > scalar_t(0.0) ? dout * ds_alpha_p * v * v
                                                : scalar_t(0.0);
-}
-
-template <typename T>
-__device__ __forceinline__ T compute_dp_f16(T v, T dout, T ds_alpha_p) {
-  T zero = zero2(v);
-  T mask = __hgt2(v, zero);
-
-  T term = __hmul2(dout, __hmul2(ds_alpha_p, __hmul2(v, v)));
-  return select2(mask, term, zero);
 }
 
 template <typename scalar_t>
@@ -520,36 +506,13 @@ __device__ __forceinline__ scalar_t compute_dn(scalar_t v, scalar_t dout,
              : scalar_t(0.0);
 }
 
-template <typename T>
-__device__ __forceinline__ T compute_dn_f16(T v, T dout, T ds_alpha_n, T eps) {
-  T zero = zero2(v);
-  T one = one2(v);
-  T exp_input = __hmin2(v, eps);
-  T expm1_val = __hsub2(h2exp(exp_input), one);
-
-  T term = __hmul2(dout, __hmul2(ds_alpha_n, __hsub2(expm1_val, v)));
-  T mask = __hle2(v, zero);
-
-  return select2(mask, term, zero);
-}
-
-__device__ __forceinline__ float float16_sum(__nv_bfloat162 val) {
-  float2 v = __bfloat1622float2(val);
-  return v.x + v.y;
-}
-
-__device__ __forceinline__ float float16_sum(__half2 val) {
-  float2 v = __half22float2(val);
-  return v.x + v.y;
-}
-
 template <typename scalar_t, typename reduction_type,
           const int nelements_per_thread>
 __global__ void vectorised_xielu_backward_impl(
     const scalar_t *__restrict__ x, const int total_elements,
     const Accessor<scalar_t, 1> alpha_p, const Accessor<scalar_t, 1> alpha_n,
     const scalar_t *__restrict__ grad_outputs, const scalar_t beta,
-    const scalar_t eps, scalar_t *__restrict__ dx,
+    const scalar_t eps, bool use_stochastic_rounding, scalar_t *__restrict__ dx,
     Accessor<reduction_type, 1> dalpha_p,
     Accessor<reduction_type, 1> dalpha_n) {
 
@@ -564,38 +527,19 @@ __global__ void vectorised_xielu_backward_impl(
   const scalar_t _alpha_n = alpha_n[0];
 
   const scalar_t s_alpha_p = sp::f(_alpha_p);
-  const scalar_t s_alpha_n = beta + sp::f(_alpha_n);
+  const scalar_t s_alpha_n = sp::f(_alpha_n);
+  const scalar_t beta_s_alpha_n = beta + s_alpha_n;
   const scalar_t ds_alpha_p = sp::df(_alpha_p);
   const scalar_t ds_alpha_n = sp::df(_alpha_n);
-
-  vec_t s_alpa_p2;
-  vec_t ds_alpha_p2;
-  vec_t s_alpa_n2;
-  vec_t ds_alpha_n2;
-  vec_t beta2;
-  vec_t eps2;
-
-  if constexpr (std::is_same<native_t, __nv_bfloat16>::value) {
-    s_alpa_p2 = __float2bfloat162_rn(s_alpha_p);
-    ds_alpha_p2 = __float2bfloat162_rn(ds_alpha_p);
-    ds_alpha_n2 = __float2bfloat162_rn(ds_alpha_n);
-    s_alpa_n2 = __float2bfloat162_rn(s_alpha_n);
-    beta2 = __float2bfloat162_rn(beta);
-    eps2 = __float2bfloat162_rn(eps);
-  } else if constexpr (std::is_same<native_t, __half>::value) {
-    s_alpa_p2 = __float2half2_rn(s_alpha_p);
-    s_alpa_n2 = __float2half2_rn(s_alpha_n);
-    ds_alpha_p2 = __float2half2_rn(ds_alpha_p);
-    ds_alpha_n2 = __float2half2_rn(ds_alpha_n);
-    beta2 = __float2half2_rn(beta);
-    eps2 = __float2half2_rn(eps);
-  }
 
   reduction_type thread_dalpha_p = reduction_type(0.0);
   reduction_type thread_dalpha_n = reduction_type(0.0);
 
   int idx = blockIdx.x * blockDim.x + threadIdx.x;
   int stride = blockDim.x * gridDim.x;
+
+  // Initialize PRNG state for stochastic rounding (only if enabled)
+  unsigned int rng_state = use_stochastic_rounding ? init_random_state() : 0;
 
   for (int i = idx; i < total_elements / (packed_size * nelements_per_thread);
        i += stride) {
@@ -604,6 +548,16 @@ __global__ void vectorised_xielu_backward_impl(
 
     if constexpr (std::is_same<native_t, __nv_bfloat16>::value ||
                   std::is_same<native_t, __half>::value) {
+      // half/bfloat16: vectorized load, F32 compute, vectorized store
+
+      // Hoist constant conversions outside the loop
+      float s_alpha_p_f = static_cast<float>(s_alpha_p);
+      float s_alpha_n_f = static_cast<float>(s_alpha_n);
+      float ds_alpha_p_f = static_cast<float>(ds_alpha_p);
+      float ds_alpha_n_f = static_cast<float>(ds_alpha_n);
+      float beta_f = static_cast<float>(beta);
+      float eps_f = static_cast<float>(eps);
+
 #pragma unroll
       for (int j = 0; j < nelements_per_thread; ++j) {
         vec_t x_v =
@@ -611,15 +565,55 @@ __global__ void vectorised_xielu_backward_impl(
         vec_t grad_output_v = reinterpret_cast<const vec_t &>(
             grad_outputs[base_idx + j * packed_size]);
 
-        vec_t dx_v = compute_dx_f16(x_v, grad_output_v, s_alpa_p2, s_alpa_n2,
-                                    beta2, eps2);
-        vec_t dp_v = compute_dp_f16(x_v, grad_output_v, ds_alpha_p2);
-        vec_t dn_v = compute_dn_f16(x_v, grad_output_v, ds_alpha_n2, eps2);
+        // Unpack to scalar_t
+        scalar_t x0, x1, dout0, dout1;
+        Traits::unpack2(x_v, x0, x1);
+        Traits::unpack2(grad_output_v, dout0, dout1);
 
+        // Convert to F32
+        float x0_f = static_cast<float>(x0);
+        float x1_f = static_cast<float>(x1);
+        float dout0_f = static_cast<float>(dout0);
+        float dout1_f = static_cast<float>(dout1);
+
+        // Compute dx
+        float dx0_f = x0_f > 0.0f
+            ? dout0_f * (2.0f * s_alpha_p_f * x0_f + beta_f)
+            : dout0_f * ((beta_f + s_alpha_n_f) * expf(fminf(x0_f, eps_f)) - s_alpha_n_f);
+        float dx1_f = x1_f > 0.0f
+            ? dout1_f * (2.0f * s_alpha_p_f * x1_f + beta_f)
+            : dout1_f * ((beta_f + s_alpha_n_f) * expf(fminf(x1_f, eps_f)) - s_alpha_n_f);
+
+        // Compute dalpha_p
+        float dp0_f = x0_f > 0.0f ? dout0_f * ds_alpha_p_f * x0_f * x0_f : 0.0f;
+        float dp1_f = x1_f > 0.0f ? dout1_f * ds_alpha_p_f * x1_f * x1_f : 0.0f;
+
+        // Compute dalpha_n
+        float dn0_f = x0_f <= 0.0f
+            ? dout0_f * ds_alpha_n_f * ((expf(fminf(x0_f, eps_f)) - 1.0f) - x0_f)
+            : 0.0f;
+        float dn1_f = x1_f <= 0.0f
+            ? dout1_f * ds_alpha_n_f * ((expf(fminf(x1_f, eps_f)) - 1.0f) - x1_f)
+            : 0.0f;
+
+        // Convert back to BF16/FP16 (with optional stochastic rounding)
+        scalar_t dx0, dx1;
+        if (use_stochastic_rounding) {
+          unsigned int rand0 = lcg_random(rng_state) & 0xFFFF;
+          unsigned int rand1 = lcg_random(rng_state) & 0xFFFF;
+          dx0 = stochastic_round_f32<scalar_t>(dx0_f, rand0);
+          dx1 = stochastic_round_f32<scalar_t>(dx1_f, rand1);
+        } else {
+          dx0 = static_cast<scalar_t>(dx0_f);
+          dx1 = static_cast<scalar_t>(dx1_f);
+        }
+
+        vec_t dx_v = Traits::pack2(dx0, dx1);
         *reinterpret_cast<vec_t *>(&dx[base_idx + j * packed_size]) = dx_v;
 
-        thread_dalpha_p += float16_sum(dp_v);
-        thread_dalpha_n += float16_sum(dn_v);
+        // Accumulate gradients (in F32)
+        thread_dalpha_p += dp0_f + dp1_f;
+        thread_dalpha_n += dn0_f + dn1_f;
       }
     } else {
 #pragma unroll
@@ -693,7 +687,8 @@ __global__ void xielu_backward_impl(const scalar_t *__restrict__ x,
   const scalar_t _alpha_n = alpha_n[0];
 
   const scalar_t s_alpha_p = sp::f(_alpha_p);
-  const scalar_t s_alpha_n = beta + sp::f(_alpha_n);
+  const scalar_t s_alpha_n = sp::f(_alpha_n);
+  const scalar_t beta_s_alpha_n = beta + s_alpha_n;
   const scalar_t ds_alpha_p = sp::df(_alpha_p);
   const scalar_t ds_alpha_n = sp::df(_alpha_n);
 
@@ -736,6 +731,7 @@ std::vector<torch::Tensor> backward_impl(Tensor &x, Tensor &alpha_p,
                                          Tensor &alpha_n, const double eps,
                                          const double beta,
                                          const bool with_vector_loads,
+                                         const bool use_stochastic_rounding,
                                          Tensor &grad_outputs) {
 
   PUSH_RANGE("XIELU_BWD", 1)
@@ -754,12 +750,24 @@ std::vector<torch::Tensor> backward_impl(Tensor &x, Tensor &alpha_p,
   TORCH_CHECK(x.dtype() == alpha_n.dtype(), "Data type of x (", x.dtype(),
               ") must match data type of alpha_n (", alpha_n.dtype(), ").");
 
-  const int nbatch = x.size(0);
-  const int seq_len = x.size(1);
-  const int hidden_dim = x.size(2);
-  const int nelements = nbatch * seq_len * hidden_dim;
+  // Support both [B, S, D] and [B*S, D] shapes
+  TORCH_CHECK(x.dim() == 2 || x.dim() == 3,
+              "Input tensor must be 2D [B*S, D] or 3D [B, S, D], got ", x.dim(), "D");
 
-  TORCH_CHECK(hidden_dim % 4 == 0, "hidden_dim must be a multiple of 4");
+  int hidden_dim;
+  int nelements;
+
+  if (x.dim() == 3) {
+    // [B, S, D] format
+    hidden_dim = x.size(2);
+    nelements = x.size(0) * x.size(1) * x.size(2);
+  } else {
+    // [B*S, D] format
+    hidden_dim = x.size(1);
+    nelements = x.size(0) * x.size(1);
+  }
+
+  TORCH_CHECK(hidden_dim % 8 == 0, "hidden_dim must be a multiple of 8, got ", hidden_dim);
 
   const int blockSize = NWARPS * WARP_SIZE;
 
@@ -809,7 +817,7 @@ std::vector<torch::Tensor> backward_impl(Tensor &x, Tensor &alpha_p,
                   get_accessor<scalar_t, 1>(alpha_p),
                   get_accessor<scalar_t, 1>(alpha_n),
                   grad_outputs.data_ptr<scalar_t>(), (scalar_t)beta,
-                  (scalar_t)eps, dx.data_ptr<scalar_t>(),
+                  (scalar_t)eps, use_stochastic_rounding, dx.data_ptr<scalar_t>(),
                   get_accessor<Traits::reduction_t, 1>(dalpha_p),
                   get_accessor<Traits::reduction_t, 1>(dalpha_n));
         } else {
@@ -845,7 +853,8 @@ variable_list XIELUAutograd::backward(AutogradContext *ctx,
   const double eps = ctx->saved_data["eps"].toDouble();
   const double beta = ctx->saved_data["beta"].toDouble();
   const bool with_vector_loads = ctx->saved_data["with_vector_loads"].toBool();
+  const bool use_stochastic_rounding = ctx->saved_data["use_stochastic_rounding"].toBool();
 
   return backward_impl(x, alpha_p, alpha_n, eps, beta, with_vector_loads,
-                       grad_outputs[0]);
+                       use_stochastic_rounding, grad_outputs[0]);
 }

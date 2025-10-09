@@ -12,9 +12,10 @@ using torch::Tensor;
 
 // wrapper class which we expose to the API.
 torch::Tensor XIELU::forward(Tensor x, Tensor alpha_p, Tensor alpha_n,
-                             double beta, double eps, bool with_vector_loads) {
+                             double beta, double eps, bool with_vector_loads,
+                             bool use_stochastic_rounding) {
   return XIELUAutograd::apply(x, alpha_p, alpha_n, beta, eps,
-                              with_vector_loads);
+                              with_vector_loads, use_stochastic_rounding);
 }
 
 TORCH_LIBRARY(xielu, m) {

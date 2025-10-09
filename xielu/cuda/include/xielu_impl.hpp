@@ -14,19 +14,21 @@ class XIELUAutograd : public Function<XIELUAutograd> {
 public:
   static torch::Tensor forward(AutogradContext *ctx, Tensor &x, Tensor &alpha_p,
                                Tensor &alpha_n, double beta, double eps,
-                               bool with_vector_loads);
+                               bool with_vector_loads, bool use_stochastic_rounding);
 
   static variable_list backward(AutogradContext *ctx,
                                 variable_list grad_outputs);
 };
 
 torch::Tensor forward_impl(Tensor &x, Tensor &alpha_p, Tensor &alpha_n,
-                           double beta, double eps, bool with_vector_loads);
+                           double beta, double eps, bool with_vector_loads,
+                           bool use_stochastic_rounding);
 
 std::vector<torch::Tensor> backward_impl(Tensor &x, Tensor &alpha_p,
                                          Tensor &alpha_n, const double eps,
                                          const double beta,
                                          const bool with_vector_loads,
+                                         const bool use_stochastic_rounding,
                                          Tensor &grad_outputs);
 
 #endif
